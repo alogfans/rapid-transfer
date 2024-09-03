@@ -1,0 +1,7 @@
+.cache
+.vscode
+build
+build_ofed4
+old
+thirdparties
+local_test
