@@ -95,7 +95,7 @@ namespace rapid
         int unregisterLocalMemory(void *addr);
 
         // Start listen thread, required if this instance will receive data from remote
-        int startListener(const OnReceiveBeginCallback &on_receive_begin);
+        int startListener(const std::string &listen_address, const OnReceiveBeginCallback &on_receive_begin);
 
         // Stop listen thread
         int shutdownListener();

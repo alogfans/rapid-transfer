@@ -22,7 +22,8 @@
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
 DEFINE_string(path, "", "Path of file to transfer");
 DEFINE_string(device, "mlx5_2", "RDMA device name to use");
-DEFINE_string(target, "optane21", "Target hostname (and port, if needed)");
+DEFINE_string(target, "optane21:12348", "Target hostname (and port, if needed)");
+DEFINE_string(listen, ":12348", "TCP listen address");
 
 using namespace rapid;
 
@@ -155,7 +156,7 @@ int receiver()
         return 0;
     };
 
-    ret = engine->startListener(on_receive);
+    ret = engine->startListener(FLAGS_listen, on_receive);
     if (ret)
     {
         LOG(ERROR) << "Failed to start transfer engine";

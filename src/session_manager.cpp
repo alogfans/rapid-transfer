@@ -90,8 +90,31 @@ namespace rapid
         return str;
     }
 
-    int SessionManager::startListener(uint16_t port, const OnAcceptCallback &on_accept)
+    static inline bool isValidPort(int port)
     {
+        return port >= 0 && port <= 65535; // 检查端口是否在有效范围内
+    }
+
+    static inline int parseHostPort(const std::string &address, std::string &hostname, uint16_t &port)
+    {
+        size_t pos = address.find(':');
+        if (pos == std::string::npos)
+            return -1;
+        hostname = address.substr(0, pos);
+        port = (uint16_t)std::stoi(address.substr(pos + 1));
+        return 0;
+    }
+
+    int SessionManager::startListener(const std::string &address, const OnAcceptCallback &on_accept)
+    {
+        std::string hostname;
+        uint16_t port;
+        if (parseHostPort(address, hostname, port))
+        {
+            PLOG(ERROR) << "Illegal address format";
+            return -1;
+        }
+
         sockaddr_in bind_address;
         int on = 1, listen_fd = -1;
         memset(&bind_address, 0, sizeof(sockaddr_in));
@@ -207,8 +230,7 @@ namespace rapid
         return -1;
     }
 
-    int SessionManager::connect(const std::string &hostname,
-                                uint16_t rpc_port,
+    int SessionManager::connect(const std::string &address,
                                 const Attributes &request,
                                 Attributes &response)
     {
@@ -218,8 +240,16 @@ namespace rapid
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_STREAM;
 
+        std::string hostname;
+        uint16_t port;
+        if (parseHostPort(address, hostname, port))
+        {
+            PLOG(ERROR) << "Illegal address format";
+            return -1;
+        }
+
         char service[16];
-        sprintf(service, "%u", rpc_port);
+        sprintf(service, "%u", port);
         if (getaddrinfo(hostname.c_str(), service, &hints, &result))
         {
             PLOG(ERROR) << "Failed to get IP address of peer server " << hostname

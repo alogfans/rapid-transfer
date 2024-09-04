@@ -116,6 +116,8 @@ namespace rapid
         {
             auto &target = task->target_list[index];
             auto &response = response_list[index];
+            if (!response.count("_lid") || !response.count("_gid") || !response.count("_qp"))
+                return -1;
             auto lid = (uint16_t)std::stoi(response.at("_lid"));
             auto gid = response.at("_gid");
             auto qp_num_list = FromString(response.at("_qp"));
@@ -145,6 +147,9 @@ namespace rapid
     {
         auto task = getTaskById(task_id);
         if (!task)
+            return -1;
+
+        if (!request.count("_name") || !request.count("_lid") || !request.count("_gid") || !request.count("_qp"))
             return -1;
 
         auto target = request.at("_name");

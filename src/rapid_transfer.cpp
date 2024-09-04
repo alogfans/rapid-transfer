@@ -8,8 +8,6 @@
 
 namespace rapid
 {
-    const static uint16_t kDefaultOOBCommPort = 12348;
-
     std::shared_ptr<RapidTransfer> RapidTransfer::Create(const std::string &protocol,
                                                          const std::string &device_name,
                                                          const std::string &local_hostname,
@@ -84,7 +82,7 @@ namespace rapid
         for (size_t i = 0; i < target_list.size(); ++i)
         {
             Attributes response;
-            ret = session_manager_->connect(target_list[i], kDefaultOOBCommPort, request_list[i], response);
+            ret = session_manager_->connect(target_list[i], request_list[i], response);
             if (ret)
             {
                 LOG(ERROR) << "Failed to connect target: " << target_list[i];
@@ -132,7 +130,7 @@ namespace rapid
         return protocol_->unregisterLocalMemory(addr);
     }
 
-    int RapidTransfer::startListener(const OnReceiveBeginCallback &on_receive_begin)
+    int RapidTransfer::startListener(const std::string &listen_address, const OnReceiveBeginCallback &on_receive_begin)
     {
         auto on_accept = [=](const Attributes &request, Attributes &response) -> int
         {
@@ -148,7 +146,7 @@ namespace rapid
                 response["_error"] = "unable to start receive task";
             return ret;
         };
-        return session_manager_->startListener(kDefaultOOBCommPort, on_accept);
+        return session_manager_->startListener(listen_address, on_accept);
     }
 
     int RapidTransfer::shutdownListener()

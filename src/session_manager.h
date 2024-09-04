@@ -22,14 +22,11 @@ namespace rapid
         SessionManager(const SessionManager &) = delete;
         SessionManager &operator=(const SessionManager &) = delete;
 
-        int startListener(uint16_t port, const OnAcceptCallback &on_accept);
+        int startListener(const std::string &address, const OnAcceptCallback &on_accept);
 
         int shutdownListener();
 
-        int connect(const std::string &hostname,
-                    uint16_t rpc_port,
-                    const Attributes &request,
-                    Attributes &response);
+        int connect(const std::string &address, const Attributes &request, Attributes &response);
 
     private:
         void listener();
