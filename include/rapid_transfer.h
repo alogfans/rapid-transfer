@@ -1,4 +1,7 @@
 // rapid_transfer.h
+//
+// C++ Interface of RapidTransfer
+//
 // Copyright (C) 2024 Feng Ren
 
 #ifndef RAPID_TRANSFER_H
@@ -33,50 +36,69 @@ namespace rapid
 
     class SessionManager;
     class Protocol;
-    class SessionManager;
 
     class RapidTransfer
     {
     public:
-        static std::shared_ptr<RapidTransfer> Create(const std::string &protocol);
+        // Create an instance
+        // Parameters:
+        // - protocol: Transfer protocol name, can be either `rdma-reliable` or `rdma-unreliable`
+        // - device_name: RDMA NIC name for transfer, e.g. `mlx5_0`
+        // - local_hostname: Local server identification, `gethostname(2)` by default
+        // - rdma_port: RDMA NIC port for communication
+        // - gid_index: RDMA Local GID index for communication
+        //
+        // Return Value: RapidTransfer pointer if success, nullptr if failed
+        static std::shared_ptr<RapidTransfer> Create(const std::string &protocol,
+                                                     const std::string &device_name,
+                                                     const std::string &local_hostname = "",
+                                                     uint8_t rdma_port = 1,
+                                                     int gid_index = 3);
 
-        RapidTransfer();
+        RapidTransfer(const std::string &device_name);
 
         virtual ~RapidTransfer();
 
-        // 作为发起方，主动调用此函数以开始执行一次异步的文件传输过程。
-        // - target_list：拟传输的目标服务器名称列表。如果成员数量为多个，将会执行多播
-        // - attributes：用户定义的附加属性
-        // - buffers：传输的数据来源，用 iovec 形式表示。
-        // 返回值：TaskID 标识符，通过 getStatus() 可以获知进度&状态
+        // Start an asynchronous file transfer task
+        // - target_list: Hostnames (or IP ports) of target servers to transfer file
+        // - attributes: User-defined attributes (key-value style)
+        // - buffer_list: List of memory buffers, representing the content of transferred data
+        //
+        // Return Value: Task ID if success, negative values if failed
         TaskID send(const std::vector<std::string> &target_list,
                     const Attributes &attributes,
-                    const std::vector<Buffer> &buffers);
+                    const std::vector<Buffer> &buffer_list);
 
-        // 作为接收方，RapidTransfer 实例启动时会开启监听服务。当发送方发起 send 请求时，
-        // RapidTransfer 实例调用此接口，用户需指定缓冲空间并填充到 buffers 向量结构中
-        // 之后，RapidTransfer 将自动推进可靠的数据传输。注意传入数据还包括 TaskID 标识符，
-        // 因此可通过 getStatus() 获知传输进度&状态
-        // 返回值：非0值表示拒绝传输。
-        using OnReceiveCallback = std::function<int(TaskID,
-                                                    const std::string &,
-                                                    const Attributes &,
-                                                    std::vector<Buffer> &)>;
+        // Optional callback: be called if a receive task is completed (success or failed)
+        using OnReceiveEndCallback = std::function<int(TaskID, const std::vector<Buffer> &)>;
 
-        // 获取收/发进度
-        Status getStatus(TaskID task, size_t *transferred_bytes);
+        // Callback: be called if new send task from remote server arrived
+        // User should allocate buffer_list for storing data
+        // If needed, set on_success and/or on_failure callbacks after transfer completed
+        using OnReceiveBeginCallback = std::function<int(TaskID,
+                                                         const std::string & /* peer hostname */,
+                                                         const Attributes & /* attributes from peer */,
+                                                         std::vector<Buffer> & /* to fill: buffer_list */,
+                                                         OnReceiveEndCallback & /* to fill: on_success */,
+                                                         OnReceiveEndCallback & /* to fill: on_failure */)>;
 
-        // 注册本地内存区域，buffers 所指向的内存空间必须包含其中（暂不可跨越）
-        int registerBuffer(void *addr, size_t length);
+        // Get send/receive progress
+        Status getStatus(TaskID task_id, size_t *transferred_bytes);
 
-        // 反注册相应的本地内存区域
-        int unregisterBuffer(void *addr);
+        // Free internal resource for specified task, i.e., call getStatus() is then undefined
+        int freeTask(TaskID task_id);
 
-        // 启动监听服务
-        int start(const OnReceiveCallback &on_receive);
+        // Register local memory region, address regions of Buffer objects must have been registered
+        int registerLocalMemory(void *addr, size_t length);
 
-        // 停止监听服务
-        int shutdown();
+        // Unregister local memory region
+        int unregisterLocalMemory(void *addr);
+
+        // Start listen thread, required if this instance will receive data from remote
+        int startListener(const OnReceiveBeginCallback &on_receive_begin);
+
+        // Stop listen thread
+        int shutdownListener();
 
     private:
         SessionManager *session_manager_;

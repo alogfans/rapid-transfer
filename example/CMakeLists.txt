@@ -1,2 +1,5 @@
 add_executable(rapid_transfer rapid_transfer.cpp)
 target_link_libraries(rapid_transfer PUBLIC rapid)
+
+add_executable(rapid_transfer_perf rapid_transfer_perf.cpp)
+target_link_libraries(rapid_transfer_perf PUBLIC rapid)

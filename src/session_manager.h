@@ -18,12 +18,14 @@ namespace rapid
         using OnAcceptCallback = std::function<int(const Attributes &, Attributes &)>;
 
         SessionManager() : listen_running_(false), listen_fd_(-1) {}
-        virtual ~SessionManager() { shutdown(); }
+        virtual ~SessionManager() { shutdownListener(); }
         SessionManager(const SessionManager &) = delete;
         SessionManager &operator=(const SessionManager &) = delete;
 
-        int start(uint16_t port, const OnAcceptCallback &on_accept);
-        int shutdown();
+        int startListener(uint16_t port, const OnAcceptCallback &on_accept);
+
+        int shutdownListener();
+
         int connect(const std::string &hostname,
                     uint16_t rpc_port,
                     const Attributes &request,

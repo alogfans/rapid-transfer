@@ -9,8 +9,6 @@
 #include <set>
 #include <sys/socket.h>
 
-#define ERR_SOCKET (-1)
-
 namespace rapid
 {
     static inline ssize_t writeFully(int fd, const void *buf, size_t len)
@@ -69,9 +67,9 @@ namespace rapid
     {
         uint64_t length = str.size();
         if (writeFully(fd, &length, sizeof(length)) != (ssize_t)sizeof(length))
-            return ERR_SOCKET;
+            return -1;
         if (writeFully(fd, str.data(), length) != (ssize_t)length)
-            return ERR_SOCKET;
+            return -1;
         return 0;
     }
 
@@ -92,7 +90,7 @@ namespace rapid
         return str;
     }
 
-    int SessionManager::start(uint16_t port, const OnAcceptCallback &on_accept)
+    int SessionManager::startListener(uint16_t port, const OnAcceptCallback &on_accept)
     {
         sockaddr_in bind_address;
         int on = 1, listen_fd = -1;
@@ -105,7 +103,7 @@ namespace rapid
         if (listen_fd < 0)
         {
             PLOG(ERROR) << "Failed to create socket";
-            return ERR_SOCKET;
+            return -1;
         }
 
         struct timeval timeout;
@@ -115,28 +113,28 @@ namespace rapid
         {
             PLOG(ERROR) << "Failed to set socket timeout";
             close(listen_fd);
-            return ERR_SOCKET;
+            return -1;
         }
 
         if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)))
         {
             PLOG(ERROR) << "Failed to set address reusable";
             close(listen_fd);
-            return ERR_SOCKET;
+            return -1;
         }
 
         if (bind(listen_fd, (sockaddr *)&bind_address, sizeof(sockaddr_in)) < 0)
         {
             PLOG(ERROR) << "Failed to bind address";
             close(listen_fd);
-            return ERR_SOCKET;
+            return -1;
         }
 
         if (listen(listen_fd, 5))
         {
             PLOG(ERROR) << "Failed to listen";
             close(listen_fd);
-            return ERR_SOCKET;
+            return -1;
         }
 
         listen_fd_ = listen_fd;
@@ -198,7 +196,7 @@ namespace rapid
         }
     }
 
-    int SessionManager::shutdown()
+    int SessionManager::shutdownListener()
     {
         if (listen_running_.exchange(false))
         {
@@ -226,7 +224,7 @@ namespace rapid
         {
             PLOG(ERROR) << "Failed to get IP address of peer server " << hostname
                         << ", check DNS and /etc/hosts, or use IPv4 address instead";
-            return ERR_SOCKET;
+            return -1;
         }
 
         int ret = 0;
@@ -253,13 +251,13 @@ namespace rapid
         if (conn_fd == -1)
         {
             PLOG(ERROR) << "Failed to create socket";
-            return ERR_SOCKET;
+            return -1;
         }
         if (setsockopt(conn_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)))
         {
             PLOG(ERROR) << "Failed to set address reusable";
             close(conn_fd);
-            return ERR_SOCKET;
+            return -1;
         }
 
         struct timeval timeout;
@@ -269,28 +267,28 @@ namespace rapid
         {
             PLOG(ERROR) << "Failed to set socket timeout";
             close(conn_fd);
-            return ERR_SOCKET;
+            return -1;
         }
 
         if (::connect(conn_fd, addr->ai_addr, addr->ai_addrlen))
         {
             PLOG(ERROR) << "Failed to connect";
             close(conn_fd);
-            return ERR_SOCKET;
+            return -1;
         }
 
         if (writeAttributes(conn_fd, request))
         {
             PLOG(ERROR) << "Failed to write request attributes";
             close(conn_fd);
-            return ERR_SOCKET;
+            return -1;
         }
 
         if (readAttributes(conn_fd, response))
         {
             PLOG(ERROR) << "Failed to read response attributes";
             close(conn_fd);
-            return ERR_SOCKET;
+            return -1;
         }
 
         close(conn_fd);
@@ -304,13 +302,12 @@ namespace rapid
         std::string json_string, errs;
 
         json_string = readString(fd);
-        LOG(INFO) << json_string;
         std::istringstream iss(json_string);
 
         if (!Json::parseFromStream(reader, iss, &json_object, &errs))
         {
             LOG(ERROR) << "Failed to parse: " << errs;
-            return ERR_SOCKET;
+            return -1;
         }
 
         for (const auto &key : json_object.getMemberNames())

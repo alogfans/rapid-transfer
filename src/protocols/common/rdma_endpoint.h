@@ -4,6 +4,7 @@
 #ifndef RDMA_ENDPOINT_H
 #define RDMA_ENDPOINT_H
 
+#include "protocol.h"
 #include "rapid_transfer.h"
 #include "rdma_context.h"
 
@@ -11,12 +12,6 @@
 
 namespace rapid
 {
-    enum RequestType
-    {
-        SEND,
-        RECEIVE
-    };
-
     struct Task;
 
     struct Request

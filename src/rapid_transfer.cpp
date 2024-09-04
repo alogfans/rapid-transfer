@@ -10,53 +10,106 @@ namespace rapid
 {
     const static uint16_t kDefaultOOBCommPort = 12348;
 
-    std::shared_ptr<RapidTransfer> RapidTransfer::Create(const std::string &protocol)
+    std::shared_ptr<RapidTransfer> RapidTransfer::Create(const std::string &protocol,
+                                                         const std::string &device_name,
+                                                         const std::string &local_hostname,
+                                                         uint8_t rdma_port,
+                                                         int gid_index)
     {
-        return std::make_shared<RapidTransfer>();
+        if (protocol == "rdma_reliable")
+        {
+            auto engine = std::make_shared<RapidTransfer>(device_name);
+            engine->session_manager_ = new SessionManager();
+            auto protocol_impl = new RdmaReliableProtocol();
+            engine->protocol_ = protocol_impl;
+
+            std::string hostname = local_hostname;
+            if (hostname.empty())
+            {
+                const static size_t kHostnameBufLength = 1024;
+                char hostname_buf[kHostnameBufLength];
+                int ret = gethostname(hostname_buf, kHostnameBufLength);
+                if (ret)
+                {
+                    PLOG(ERROR) << "Failed to get hostname";
+                    return nullptr;
+                }
+            }
+
+            int ret = protocol_impl->construct(hostname, device_name, rdma_port, gid_index);
+            if (ret)
+            {
+                LOG(ERROR) << "Failed to construct protocol";
+                return nullptr;
+            }
+
+            return engine;
+        }
+
+        LOG(ERROR) << "Unrecognized protocol";
+        return nullptr;
     }
 
-    RapidTransfer::RapidTransfer()
+    RapidTransfer::RapidTransfer(const std::string &device_name)
         : session_manager_(nullptr),
-          protocol_(nullptr)
-    {
-        session_manager_ = new SessionManager();
-        protocol_ = new RdmaReliableProtocol();
-
-        char hostname[1024];
-        gethostname(hostname, 1024);
-        ((RdmaReliableProtocol *)protocol_)->construct(hostname, "mlx5_2", 1, 3);
-    }
+          protocol_(nullptr) {}
 
     RapidTransfer::~RapidTransfer()
     {
-        ((RdmaReliableProtocol *)protocol_)->deconstruct();
         delete protocol_;
         delete session_manager_;
     }
 
     TaskID RapidTransfer::send(const std::vector<std::string> &target_list,
                                const Attributes &attributes,
-                               const std::vector<Buffer> &buffers)
+                               const std::vector<Buffer> &buffer_list)
     {
         std::vector<Attributes> request_list, response_list;
-        const size_t target_count = target_list.size();
 
-        TaskID task = protocol_->allocateTask();
-        if (task < 0)
-            return task;
+        TaskID task_id = protocol_->allocateTask(SEND);
+        if (task_id < 0)
+        {
+            LOG(ERROR) << "Unable to allocate task";
+            return task_id;
+        }
 
-        protocol_->prepareSend(task, request_list, target_list, attributes, buffers);
-        response_list.resize(target_count);
+        int ret = protocol_->prepareSend(task_id, request_list, target_list, attributes, buffer_list);
+        if (ret)
+        {
+            LOG(ERROR) << "Failed to prepare send request";
+            protocol_->setFailedStatus(task_id);
+            return task_id;
+        }
 
         for (size_t i = 0; i < target_list.size(); ++i)
         {
-            int ret = session_manager_->connect(target_list[i], kDefaultOOBCommPort, request_list[i], response_list[i]);
+            Attributes response;
+            ret = session_manager_->connect(target_list[i], kDefaultOOBCommPort, request_list[i], response);
             if (ret)
-                protocol_->setFailedStatus(task);
+            {
+                LOG(ERROR) << "Failed to connect target: " << target_list[i];
+                protocol_->setFailedStatus(task_id);
+                return task_id;
+            }
+
+            if (response.count("_error"))
+            {
+                LOG(ERROR) << "Peer rejects the connection: " << response.at("_error");
+                protocol_->setFailedStatus(task_id);
+                return task_id;
+            }
+
+            response_list.push_back(response);
         }
 
-        protocol_->issueSend(task, response_list);
-        return task;
+        ret = protocol_->issueSend(task_id, response_list);
+        if (ret)
+        {
+            LOG(ERROR) << "Failed to issue send request";
+            protocol_->setFailedStatus(task_id);
+        }
+
+        return task_id;
     }
 
     Status RapidTransfer::getStatus(TaskID task, size_t *transferred_bytes)
@@ -64,30 +117,42 @@ namespace rapid
         return protocol_->getStatus(task, transferred_bytes);
     }
 
-    int RapidTransfer::registerBuffer(void *addr, size_t length)
+    int RapidTransfer::freeTask(TaskID task_id)
     {
-        return protocol_->registerBuffer(addr, length);
+        return protocol_->freeTask(task_id);
     }
 
-    int RapidTransfer::unregisterBuffer(void *addr)
+    int RapidTransfer::registerLocalMemory(void *addr, size_t length)
     {
-        return protocol_->unregisterBuffer(addr);
+        return protocol_->registerLocalMemory(addr, length);
     }
 
-    int RapidTransfer::start(const OnReceiveCallback &on_receive)
+    int RapidTransfer::unregisterLocalMemory(void *addr)
+    {
+        return protocol_->unregisterLocalMemory(addr);
+    }
+
+    int RapidTransfer::startListener(const OnReceiveBeginCallback &on_receive_begin)
     {
         auto on_accept = [=](const Attributes &request, Attributes &response) -> int
         {
-            TaskID task = protocol_->allocateTask();
-            if (task < 0)
-                return task;
-            return protocol_->prepareReceive(task, request, response, on_receive);
+            TaskID task_id = protocol_->allocateTask(RECEIVE);
+            if (task_id < 0)
+            {
+                LOG(ERROR) << "Unable to allocate task";
+                response["_error"] = "unable to allocate task";
+                return task_id;
+            }
+            int ret = protocol_->prepareReceive(task_id, request, response, on_receive_begin);
+            if (ret)
+                response["_error"] = "unable to start receive task";
+            return ret;
         };
-        return session_manager_->start(kDefaultOOBCommPort, on_accept);
+        return session_manager_->startListener(kDefaultOOBCommPort, on_accept);
     }
 
-    int RapidTransfer::shutdown()
+    int RapidTransfer::shutdownListener()
     {
-        return session_manager_->shutdown();
+        return session_manager_->shutdownListener();
     }
 } // namespace rapid

@@ -7,6 +7,7 @@ set(CMAKE_CXX_FLAGS "-O3 -g -Wall")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories(include)
+include_directories(src)
 
 add_subdirectory(src)
 add_subdirectory(example)

@@ -4,6 +4,8 @@
 #ifndef RDMA_CONTEXT_H
 #define RDMA_CONTEXT_H
 
+#include "concurrency.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -15,8 +17,6 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
-
-#include "../../concurrency.h"
 
 namespace rapid
 {
