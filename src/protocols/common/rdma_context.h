@@ -111,6 +111,8 @@ namespace rapid
 
         int socketId();
 
+        std::string localHostname() const { return local_hostname_; }
+
     private:
         int openRdmaDevice(const std::string &device_name, uint8_t port, int gid_index);
 

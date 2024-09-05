@@ -216,7 +216,7 @@ namespace rapid
             return -1;
         }
 
-        if (active_ && status_.load() == CONNECTED)
+        if (status_.load() == CONNECTED)
             return 0;
 
         for (int qp_index = 0; qp_index < (int)qp_list_.size(); ++qp_index)

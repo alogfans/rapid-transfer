@@ -21,8 +21,10 @@
 
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
 DEFINE_string(device, "mlx5_3", "RDMA device name to use");
-DEFINE_string(target, "optane21:12348", "Target hostname (and port, if needed)");
-DEFINE_string(listen, ":12348", "TCP listen address");
+DEFINE_string(target_hostname, "optane21", "Target hostname (and port, if needed)");
+DEFINE_uint32(first_port, 12345, "First TCP port for connecting");
+DEFINE_uint32(threads, 8, "Number of concurrent threads");
+DEFINE_uint32(block_size, 65536, "Access granularity");
 
 using namespace rapid;
 
@@ -88,22 +90,14 @@ static inline ssize_t readFully(int fd, void *buf, size_t len)
     return len;
 }
 
-std::function<void()> cleanup_func;
-
-void signalHandler(int signum)
+int receiveThread(int thread_id)
 {
-    LOG(INFO) << "Interrupt signal (" << signum << ") received";
-    if (cleanup_func)
-        cleanup_func();
-    exit(signum);
-}
-
-int receiver()
-{
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device);
+    uint16_t port = FLAGS_first_port + thread_id;
+    std::string local_hostname = "client-" + std::to_string(thread_id);
+    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname);
     LOG_ASSERT(engine);
 
-    const size_t dram_buffer_size = 1ull << 30;
+    const size_t dram_buffer_size = 64 * 1024 * 1024;
     void *addr = allocateMemoryPool(dram_buffer_size, 0);
     if (!addr)
     {
@@ -131,7 +125,7 @@ int receiver()
         return 0;
     };
 
-    ret = engine->startListener(FLAGS_listen, on_receive);
+    ret = engine->startListener(":" + std::to_string(port), on_receive);
     if (ret)
     {
         LOG(ERROR) << "Failed to start transfer engine";
@@ -140,26 +134,23 @@ int receiver()
         return -1;
     }
 
-    cleanup_func = [&]()
-    {
-        engine->shutdownListener();
-        engine->unregisterLocalMemory(addr);
-        freeMemoryPool(addr, dram_buffer_size);
-    };
-
-    std::signal(SIGINT, signalHandler);
     while (true)
         std::this_thread::yield();
 
     return 0;
 }
 
-int sender()
-{
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device);
-    LOG_ASSERT(engine);
+std::atomic<bool> g_running = true;
+std::atomic<uint64_t> g_transferred_bytes = 0;
 
-    const size_t dram_buffer_size = 1ull << 30;
+int sendThread(pthread_barrier_t *barrier, int thread_id)
+{
+    std::string local_hostname = "client-" + std::to_string(thread_id);
+    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname);
+    LOG_ASSERT(engine);
+    uint64_t transferred_bytes = 0;
+
+    const size_t dram_buffer_size = 64 * 1024 * 1024;
     void *addr = allocateMemoryPool(dram_buffer_size, 0);
     if (!addr)
     {
@@ -175,32 +166,71 @@ int sender()
         return -1;
     }
 
-    timeval tv_begin, tv_end;
-    gettimeofday(&tv_begin, nullptr);
-    size_t chunk_size = dram_buffer_size;
-    size_t max_iter = 100;
-    for (size_t iter = 0; iter < max_iter; iter++)
+    pthread_barrier_wait(barrier);
+    size_t chunk_size = FLAGS_block_size;
+    while (g_running)
     {
         rapid::Buffer buf = {.addr = addr, .length = chunk_size};
         Attributes attributes;
         attributes["size"] = std::to_string(chunk_size);
-        TaskID task = engine->send({FLAGS_target}, attributes, {buf});
+        uint16_t port = FLAGS_first_port + lrand48() % FLAGS_threads;
+        auto target = FLAGS_target_hostname + ":" + std::to_string(port);
+        TaskID task = engine->send({target}, attributes, {buf});
         while (true)
         {
             auto status = engine->getStatus(task, nullptr);
             if (status == rapid::FAILED)
             {
                 LOG(ERROR) << "Failed to send data to remote";
-                return -1;
+                break;
             }
 
             if (status == rapid::SUCCESS)
                 break;
         }
+        engine->freeTask(task);
+        transferred_bytes += chunk_size;
     }
+    pthread_barrier_wait(barrier);
+    g_transferred_bytes += transferred_bytes;
+    return 0;
+}
+
+int receiver()
+{
+    std::thread workers[FLAGS_threads];
+    for (uint32_t i = 0; i < FLAGS_threads; ++i)
+        workers[i] = std::thread(receiveThread, (int)i);
+    for (uint32_t i = 0; i < FLAGS_threads; ++i)
+        workers[i].join();
+    return 0;
+}
+
+int sender()
+{
+    std::thread workers[FLAGS_threads];
+    pthread_barrier_t barrier;
+    pthread_barrier_init(&barrier, nullptr, FLAGS_threads + 1);
+    timeval tv_begin, tv_end;
+
+    for (uint32_t i = 0; i < FLAGS_threads; ++i)
+        workers[i] = std::thread(sendThread, &barrier, (int)i);
+
+    pthread_barrier_wait(&barrier);
+    gettimeofday(&tv_begin, nullptr);
+
+    sleep(5);
+    g_running = false;
+
+    pthread_barrier_wait(&barrier);
     gettimeofday(&tv_end, nullptr);
+
+    for (uint32_t i = 0; i < FLAGS_threads; ++i)
+        workers[i].join();
+
+    pthread_barrier_destroy(&barrier);
     double duration = (tv_end.tv_sec - tv_begin.tv_sec) + (tv_end.tv_usec - tv_begin.tv_usec) / 1000000.0;
-    LOG(INFO) << max_iter * chunk_size / duration / 1024.0 / 1024.0 / 1024.0;
+    LOG(INFO) << g_transferred_bytes.load() / duration / 1024.0 / 1024.0 / 1024.0;
     return 0;
 }
 

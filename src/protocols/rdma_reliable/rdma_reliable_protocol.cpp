@@ -94,7 +94,7 @@ namespace rapid
         {
             Attributes request;
             auto endpoint = context_.getOrCreateEndpoint(target);
-            request["_name"] = target;
+            request["_name"] = context_.localHostname();
             request["_lid"] = std::to_string(context_.lid());
             request["_gid"] = context_.gid();
             request["_qp"] = ToString(endpoint->qpNum());
@@ -134,7 +134,12 @@ namespace rapid
                 request_list.push_back(request);
                 task->total_packets++;
             }
-            endpoint->postRequest(RequestType::SEND, request_list);
+            ret = endpoint->postRequest(RequestType::SEND, request_list);
+            if (ret != (int)request_list.size()) 
+            {
+                LOG(INFO) << "Unable to post request";
+                return -1;
+            }
         }
 
         return 0;
@@ -187,8 +192,11 @@ namespace rapid
         }
 
         ret = endpoint->postRequest(RequestType::RECEIVE, request_list);
-        if (ret != (int)request_list.size())
+        if (ret != (int)request_list.size()) 
+        {
+            LOG(INFO) << "Unable to post request";
             return -1;
+        }
 
         return 0;
     }

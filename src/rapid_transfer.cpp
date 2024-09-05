@@ -32,6 +32,7 @@ namespace rapid
                     PLOG(ERROR) << "Failed to get hostname";
                     return nullptr;
                 }
+                hostname = hostname_buf;
             }
 
             int ret = protocol_impl->construct(hostname, device_name, rdma_port, gid_index);
