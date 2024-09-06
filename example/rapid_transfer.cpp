@@ -120,43 +120,20 @@ int receiver()
         return -1;
     }
 
-    auto on_success_callback = [&](TaskID task_id, const std::vector<rapid::Buffer> &buffer_list) -> int
-    {
-        int fd = open(FLAGS_path.c_str(), O_WRONLY, 0644);
-        if (fd < 0)
-        {
-            LOG(ERROR) << "Failed to open file";
-            return -1;
-        }
-
-        for (auto &buffer : buffer_list)
-        {
-            if ((ssize_t)buffer.length != writeFully(fd, buffer.addr, buffer.length))
-            {
-                LOG(ERROR) << "Failed to write file";
-                return -1;
-            }
-        }
-
-        close(fd);
-        return 0;
+    std::mutex mutex;
+    TaskID task_id;
+    std::string peer_name;
+    uint64_t length = 0, packet_length = 0;
+    int packet_index = 0;
+    auto on_new_connection = [&](const std::string &peer_name_, bool is_join) {
+        LOG(INFO) << "Arriving connection: " << peer_name_;
+        peer_name = peer_name_;;
+        mutex.lock();
+        task_id = engine->receive(peer_name, {{addr, sizeof(uint64_t)}});
+        mutex.unlock();
     };
 
-    auto on_receive = [&](TaskID task,
-                          const std::string &source_hostname,
-                          const Attributes &attributes,
-                          std::vector<rapid::Buffer> &buffer_list,
-                          rapid::RapidTransfer::OnReceiveEndCallback &on_success,
-                          rapid::RapidTransfer::OnReceiveEndCallback &on_failure) -> int
-    {
-        size_t chunk_size = std::stoi(attributes.at("size"));
-        buffer_list.push_back({.addr = addr, .length = chunk_size});
-        if (!FLAGS_path.empty())
-            on_success = on_success_callback;
-        return 0;
-    };
-
-    ret = engine->startListener(FLAGS_listen, on_receive);
+    ret = engine->startListener(FLAGS_listen, on_new_connection);
     if (ret)
     {
         LOG(ERROR) << "Failed to start transfer engine";
@@ -172,10 +149,47 @@ int receiver()
         freeMemoryPool(addr, dram_buffer_size);
     };
 
-    std::signal(SIGINT, signalHandler);
-    while (true)
-        std::this_thread::yield();
+    int fd = -1;
+    if (!FLAGS_path.empty())
+    {
+        fd = open(FLAGS_path.c_str(), O_RDWR);
+        if (fd < 0)
+        {
+            LOG(ERROR) << "Failed to open file " << FLAGS_path;
+            cleanup_func();
+            return -1;
+        }
+    }
 
+    while (true)
+    {
+        mutex.lock();
+        auto my_task_id = task_id;
+        mutex.unlock();
+        if (engine->getStatus(my_task_id, nullptr) == SUCCESS)
+        {
+            if (packet_index == 0)
+                length = *(uint64_t *)addr;
+            else
+            {
+                if ((ssize_t) packet_length != writeFully(fd, addr, packet_length))
+                {
+                    LOG(ERROR) << "I/O error";
+                    cleanup_func();
+                    return -1;
+                }
+            }
+
+            packet_length = std::min(length, dram_buffer_size);
+            length -= packet_length;
+            engine->freeTask(my_task_id);
+            if (!packet_length)
+                break;
+            my_task_id = engine->receive(peer_name, {{addr, packet_length}});
+        }
+    }
+
+    cleanup_func();
     return 0;
 }
 
@@ -225,31 +239,31 @@ int sender()
         }
     }
 
-    size_t chunk_size = std::min(file_size, dram_buffer_size);
-    rapid::Buffer buf = {.addr = addr, .length = chunk_size};
-    Attributes attributes;
-    attributes["size"] = std::to_string(chunk_size);
-    if (fd >= 0)
+    for (size_t offset = 0; offset < file_size; offset += dram_buffer_size)
     {
-        if ((ssize_t)chunk_size != readFully(fd, addr, chunk_size))
+        size_t chunk_size = std::min(dram_buffer_size, file_size - offset);
+        if (fd >= 0)
         {
-            LOG(ERROR) << "Failed to read file fully";
-            return -1;
-        }
-    }
-
-    TaskID task = engine->send({FLAGS_target}, attributes, {buf});
-    while (true)
-    {
-        auto status = engine->getStatus(task, nullptr);
-        if (status == rapid::FAILED)
-        {
-            LOG(ERROR) << "Failed to send data to remote";
-            return -1;
+            if ((ssize_t)chunk_size != readFully(fd, addr, chunk_size))
+            {
+                LOG(ERROR) << "Failed to read file fully";
+                return -1;
+            }
         }
 
-        if (status == rapid::SUCCESS)
-            break;
+        TaskID task = engine->send({FLAGS_target}, {{addr, chunk_size}});
+        while (true)
+        {
+            auto status = engine->getStatus(task, nullptr);
+            if (status == rapid::FAILED)
+            {
+                LOG(ERROR) << "Failed to send data to remote";
+                return -1;
+            }
+
+            if (status == rapid::SUCCESS)
+                break;
+        }
     }
 
     LOG(INFO) << "Sending completed";

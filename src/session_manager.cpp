@@ -4,8 +4,10 @@
 #include "session_manager.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <glog/logging.h>
 #include <json/json.h>
+#include <poll.h>
 #include <set>
 #include <sys/socket.h>
 
@@ -27,8 +29,8 @@ namespace rapid
             }
             else if (rc == 0)
             {
-                LOG(WARNING) << "Socket write incompleted: expected " << len
-                             << " bytes, actual " << len - nbytes << " bytes";
+                // LOG(WARNING) << "Socket write incompleted: expected " << len
+                //              << " bytes, actual " << len - nbytes << " bytes";
                 return len - nbytes;
             }
             pos += rc;
@@ -53,8 +55,8 @@ namespace rapid
             }
             else if (rc == 0)
             {
-                LOG(WARNING) << "Socket read incompleted: expected " << len
-                             << " bytes, actual " << len - nbytes << " bytes";
+                // LOG(WARNING) << "Socket read incompleted: expected " << len
+                //              << " bytes, actual " << len - nbytes << " bytes";
                 return len - nbytes;
             }
             pos += rc;
@@ -105,6 +107,22 @@ namespace rapid
         return 0;
     }
 
+    static inline bool setNonBlocking(int sockfd)
+    {
+        int flags = fcntl(sockfd, F_GETFL, 0);
+        if (flags == -1)
+            return false;
+        return fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) == 0;
+    }
+
+    SessionManager::~SessionManager()
+    {
+        shutdownListener();
+        for (auto &entry : session_map_)
+            close(entry.second.fd);
+        session_map_.clear();
+    }
+
     int SessionManager::startListener(const std::string &address, const OnAcceptCallback &on_accept)
     {
         std::string hostname;
@@ -129,19 +147,16 @@ namespace rapid
             return -1;
         }
 
-        struct timeval timeout;
-        timeout.tv_sec = 1;
-        timeout.tv_usec = 0;
-        if (setsockopt(listen_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)))
+        if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)))
         {
-            PLOG(ERROR) << "Failed to set socket timeout";
+            PLOG(ERROR) << "Failed to set address reusable";
             close(listen_fd);
             return -1;
         }
 
-        if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)))
+        if (!setNonBlocking(listen_fd))
         {
-            PLOG(ERROR) << "Failed to set address reusable";
+            PLOG(ERROR) << "Failed to set listen fd non-blocking";
             close(listen_fd);
             return -1;
         }
@@ -169,73 +184,124 @@ namespace rapid
 
     void SessionManager::listener()
     {
+        std::vector<pollfd> fd_list;
+        pollfd listen_pollfd = {listen_fd_, POLLIN, 0};
+        fd_list.push_back(listen_pollfd);
+
         while (listen_running_)
         {
-            sockaddr_in addr;
-            socklen_t addr_len = sizeof(sockaddr_in);
-            int conn_fd = accept(listen_fd_, (sockaddr *)&addr, &addr_len);
-            if (conn_fd < 0)
+            int ret = poll(fd_list.data(), fd_list.size(), 500);
+            if (ret < 0)
             {
-                if (errno != EWOULDBLOCK)
-                    PLOG(ERROR) << "Failed to accept socket connection";
+                PLOG(ERROR) << "Poll error";
                 continue;
             }
-
-            if (addr.sin_family != AF_INET && addr.sin_family != AF_INET6)
+            if (fd_list[0].revents & (POLLERR | POLLHUP | POLLNVAL))
             {
-                LOG(ERROR) << "Unsupported socket type, should be AF_INET or AF_INET6";
-                close(conn_fd);
-                continue;
+                PLOG(ERROR) << "poll error on listen fd";
+                break;
+            }
+            else if (fd_list[0].revents & POLLIN)
+            {
+                sockaddr_in addr;
+                socklen_t addr_len = sizeof(sockaddr_in);
+                int conn_fd = accept(listen_fd_, (sockaddr *)&addr, &addr_len);
+                if (conn_fd < 0)
+                {
+                    if (errno != EWOULDBLOCK)
+                        PLOG(ERROR) << "Failed to accept socket connection";
+                    continue;
+                }
+
+                if (!setNonBlocking(conn_fd))
+                {
+                    PLOG(ERROR) << "Failed to set socket non-blocking";
+                    close(conn_fd);
+                    continue;
+                }
+
+                pollfd conn_pollfd = {conn_fd, POLLIN, 0};
+                fd_list.push_back(conn_pollfd);
             }
 
-            struct timeval timeout;
-            timeout.tv_sec = 60;
-            timeout.tv_usec = 0;
-            if (setsockopt(conn_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)))
+            for (size_t i = 1; i < fd_list.size(); ++i)
             {
-                PLOG(ERROR) << "Failed to set socket timeout";
-                close(conn_fd);
-                continue;
+                if (fd_list[i].revents & (POLLERR | POLLHUP | POLLNVAL))
+                {
+                    int conn_fd = fd_list[i].fd;
+                    if (!(fd_list[i].revents & POLLHUP))
+                        PLOG(ERROR) << "poll error on conn fd " << conn_fd;
+                    close(conn_fd);
+                    fd_list.erase(fd_list.begin() + i);
+                    continue;
+                }
+                else if (fd_list[i].revents & POLLIN)
+                {
+                    int conn_fd = fd_list[i].fd;
+                    Attributes request, response;
+                    int ret = readAttributes(conn_fd, request);
+                    if (ret)
+                    {
+                        PLOG_IF(ERROR, ret == -1) << "Failed to read request attributes";
+                        close(conn_fd);
+                        fd_list.erase(fd_list.begin() + i);
+                        continue;
+                    }
+
+                    if (on_accept_(request, response))
+                        response["error"] = "reject_connection";
+
+                    if (writeAttributes(conn_fd, response))
+                    {
+                        PLOG(ERROR) << "Failed to write response attributes";
+                        close(conn_fd);
+                        fd_list.erase(fd_list.begin() + i);
+                        continue;
+                    }
+                }
             }
-
-            Attributes request, response;
-            if (readAttributes(conn_fd, request))
-            {
-                PLOG(ERROR) << "Failed to read request attributes";
-                close(conn_fd);
-                continue;
-            }
-
-            on_accept_(request, response);
-
-            if (writeAttributes(conn_fd, response))
-            {
-                PLOG(ERROR) << "Failed to write response attributes";
-                close(conn_fd);
-                continue;
-            }
-
-            close(conn_fd);
         }
+
+        for (size_t i = 1; i < fd_list.size(); ++i)
+            close(fd_list[i].fd);
+        close(fd_list[0].fd);
     }
 
     int SessionManager::shutdownListener()
     {
         if (listen_running_.exchange(false))
-        {
             listen_thread_.join();
-            close(listen_fd_);
-            listen_fd_ = -1;
-        }
-        return -1;
+        return 0;
     }
 
     int SessionManager::connect(const std::string &address,
                                 const Attributes &request,
                                 Attributes &response)
     {
+        RWSpinlock::WriteGuard guard(session_map_lock_);
+        int conn_fd = -1;
+        if (session_map_.count(address))
+        {
+            auto &session = session_map_[address];
+            conn_fd = session.fd;
+        }
+        else
+        {
+            conn_fd = makeConnect(address);
+            if (conn_fd < 0)
+            {
+                PLOG(ERROR) << "Failed to make connection";
+                return -1;
+            }
+            session_map_[address].fd = conn_fd;
+        }
+        return sendRPC(conn_fd, request, response);
+    }
+
+    int SessionManager::makeConnect(const std::string &address)
+    {
         struct addrinfo hints;
-        struct addrinfo *result, *rp;
+        struct addrinfo *result, *addr;
         memset(&hints, 0, sizeof(hints));
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_STREAM;
@@ -257,71 +323,79 @@ namespace rapid
             return -1;
         }
 
-        int ret = 0;
-        for (rp = result; rp; rp = rp->ai_next)
+        for (addr = result; addr; addr = addr->ai_next)
         {
-            ret = postRequest(rp, request, response);
-            if (ret == 0)
+            int on = 1;
+            int conn_fd = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
+            if (conn_fd == -1)
             {
-                freeaddrinfo(result);
-                return 0;
+                PLOG(ERROR) << "Failed to create socket";
+                continue;
             }
+
+            if (setsockopt(conn_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)))
+            {
+                PLOG(ERROR) << "Failed to set address reusable";
+                continue;
+            }
+
+            struct timeval timeout;
+            timeout.tv_sec = 60;
+            timeout.tv_usec = 0;
+            if (setsockopt(conn_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)))
+            {
+                PLOG(ERROR) << "Failed to set socket timeout";
+                continue;
+            }
+
+            if (::connect(conn_fd, addr->ai_addr, addr->ai_addrlen))
+            {
+                PLOG(ERROR) << "Failed to connect";
+                continue;
+            }
+
+            freeaddrinfo(result);
+            return conn_fd;
         }
 
         freeaddrinfo(result);
-        return ret;
+        return -1;
     }
 
-    int SessionManager::postRequest(struct addrinfo *addr,
-                                    const Attributes &request,
-                                    Attributes &response)
+    int SessionManager::disconnect(const std::string &address)
     {
-        int on = 1;
-        int conn_fd = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
-        if (conn_fd == -1)
-        {
-            PLOG(ERROR) << "Failed to create socket";
+        RWSpinlock::WriteGuard guard(session_map_lock_);
+        if (!session_map_.count(address))
             return -1;
-        }
-        if (setsockopt(conn_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)))
-        {
-            PLOG(ERROR) << "Failed to set address reusable";
-            close(conn_fd);
-            return -1;
-        }
+        auto &session = session_map_[address];
+        close(session.fd);
+        session_map_.erase(address);
+        return 0;
+    }
 
-        struct timeval timeout;
-        timeout.tv_sec = 60;
-        timeout.tv_usec = 0;
-        if (setsockopt(conn_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)))
-        {
-            PLOG(ERROR) << "Failed to set socket timeout";
-            close(conn_fd);
-            return -1;
-        }
+    bool SessionManager::hasConnection(const std::string &address)
+    {
+        RWSpinlock::ReadGuard guard(session_map_lock_);
+        return session_map_.count(address);
+    }
 
-        if (::connect(conn_fd, addr->ai_addr, addr->ai_addrlen))
-        {
-            PLOG(ERROR) << "Failed to connect";
-            close(conn_fd);
-            return -1;
-        }
-
-        if (writeAttributes(conn_fd, request))
+    int SessionManager::sendRPC(int fd, const Attributes &request, Attributes &response)
+    {
+        if (writeAttributes(fd, request))
         {
             PLOG(ERROR) << "Failed to write request attributes";
-            close(conn_fd);
             return -1;
         }
-
-        if (readAttributes(conn_fd, response))
+        if (readAttributes(fd, response))
         {
             PLOG(ERROR) << "Failed to read response attributes";
-            close(conn_fd);
             return -1;
         }
-
-        close(conn_fd);
+        if (response.count("error"))
+        {
+            PLOG(ERROR) << "Connection rejected by peer: " << response.at("error");
+            return -1;
+        }
         return 0;
     }
 
@@ -332,6 +406,9 @@ namespace rapid
         std::string json_string, errs;
 
         json_string = readString(fd);
+        if (json_string.empty())
+            return -2; // Representing EOF
+
         std::istringstream iss(json_string);
 
         if (!Json::parseFromStream(reader, iss, &json_object, &errs))

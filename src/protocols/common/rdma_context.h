@@ -45,6 +45,12 @@ namespace rapid
         return server_name + NIC_PATH_DELIM + nic_name;
     }
 
+    enum
+    {
+        SEND_CQ,
+        RECV_CQ
+    };
+
     class RdmaContext
     {
     public:
@@ -102,10 +108,6 @@ namespace rapid
         int compVector();
 
         int eventFd() const { return event_fd_; }
-
-        ibv_cq *cq();
-
-        int cqCount() const { return cq_list_.size(); }
 
         int poll(int num_entries, ibv_wc *wc, int cq_index = 0);
 

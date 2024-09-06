@@ -90,10 +90,23 @@ static inline ssize_t readFully(int fd, void *buf, size_t len)
     return len;
 }
 
+static std::string getLocalHostname()
+{
+    const static size_t kHostnameBufLength = 1024;
+    char hostname_buf[kHostnameBufLength];
+    int ret = gethostname(hostname_buf, kHostnameBufLength);
+    if (ret)
+    {
+        PLOG(ERROR) << "Failed to get hostname";
+        return "";
+    }
+    return hostname_buf;
+}
+
 int receiveThread(int thread_id)
 {
     uint16_t port = FLAGS_first_port + thread_id;
-    std::string local_hostname = "client-" + std::to_string(thread_id);
+    std::string local_hostname = getLocalHostname() + std::to_string(port);
     auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname);
     LOG_ASSERT(engine);
 
@@ -112,20 +125,17 @@ int receiveThread(int thread_id)
         freeMemoryPool(addr, dram_buffer_size);
         return -1;
     }
-
-    auto on_receive = [&](TaskID task,
-                          const std::string &source_hostname,
-                          const Attributes &attributes,
-                          std::vector<rapid::Buffer> &buffer_list,
-                          rapid::RapidTransfer::OnReceiveEndCallback &on_success,
-                          rapid::RapidTransfer::OnReceiveEndCallback &on_failure) -> int
-    {
-        size_t chunk_size = std::stoi(attributes.at("size"));
-        buffer_list.push_back({.addr = addr, .length = chunk_size});
-        return 0;
+    
+    std::mutex mutex;
+    std::unordered_map<std::string, TaskID> task_id_map;
+    auto on_new_connection = [&](const std::string &peer_name, bool is_join) {
+        LOG(INFO) << "Arriving connection: " << peer_name;
+        mutex.lock();
+        task_id_map[peer_name] = engine->receive(peer_name, {{addr, FLAGS_block_size}});
+        mutex.unlock();
     };
 
-    ret = engine->startListener(":" + std::to_string(port), on_receive);
+    ret = engine->startListener(":" + std::to_string(port), on_new_connection);
     if (ret)
     {
         LOG(ERROR) << "Failed to start transfer engine";
@@ -135,7 +145,20 @@ int receiveThread(int thread_id)
     }
 
     while (true)
+    {
+        mutex.lock();
+        auto task_id_map_clone = task_id_map;
+        mutex.unlock();
+        for (auto &entry : task_id_map)
+        {
+            if (engine->getStatus(entry.second, nullptr) == SUCCESS)
+            {
+                engine->freeTask(entry.second);
+                entry.second = engine->receive(entry.first, {{addr, FLAGS_block_size}});
+            }
+        }
         std::this_thread::yield();
+    }
 
     return 0;
 }
@@ -145,7 +168,8 @@ std::atomic<uint64_t> g_transferred_bytes = 0;
 
 int sendThread(pthread_barrier_t *barrier, int thread_id)
 {
-    std::string local_hostname = "client-" + std::to_string(thread_id);
+    uint16_t port = FLAGS_first_port + thread_id;
+    std::string local_hostname = getLocalHostname() + std::to_string(port);
     auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname);
     LOG_ASSERT(engine);
     uint64_t transferred_bytes = 0;
@@ -170,12 +194,9 @@ int sendThread(pthread_barrier_t *barrier, int thread_id)
     size_t chunk_size = FLAGS_block_size;
     while (g_running)
     {
-        rapid::Buffer buf = {.addr = addr, .length = chunk_size};
-        Attributes attributes;
-        attributes["size"] = std::to_string(chunk_size);
         uint16_t port = FLAGS_first_port + lrand48() % FLAGS_threads;
         auto target = FLAGS_target_hostname + ":" + std::to_string(port);
-        TaskID task = engine->send({target}, attributes, {buf});
+        TaskID task = engine->send({target}, {{addr, chunk_size}});
         while (true)
         {
             auto status = engine->getStatus(task, nullptr);

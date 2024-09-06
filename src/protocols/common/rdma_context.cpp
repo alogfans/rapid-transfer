@@ -45,8 +45,8 @@ namespace rapid
         local_hostname_ = local_hostname;
         device_name_ = device_name;
         num_comp_channel_ = 1;
-        size_t num_cq_list = 1;
-        size_t max_cqe = 4096;
+        const static size_t num_cq_list = 2;
+        const static size_t max_cqe = 4096;
 
         if (openRdmaDevice(device_name_, rdma_port, gid_index))
         {
@@ -280,7 +280,7 @@ namespace rapid
             return endpoint_map_[peer_nic_path];
 
         auto endpoint = std::make_shared<RdmaEndPoint>(*this);
-        int ret = endpoint->construct(cq());
+        int ret = endpoint->construct(cq_list_[SEND_CQ], cq_list_[RECV_CQ]);
         if (ret)
             return nullptr;
         endpoint_map_[peer_nic_path] = endpoint;
@@ -306,12 +306,6 @@ namespace rapid
         }
 
         return gid_str;
-    }
-
-    ibv_cq *RdmaContext::cq()
-    {
-        int index = (next_cq_list_index_++) % cq_list_.size();
-        return cq_list_[index];
     }
 
     ibv_comp_channel *RdmaContext::compChannel()

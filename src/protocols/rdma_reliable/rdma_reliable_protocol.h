@@ -15,28 +15,18 @@ namespace rapid
 {
     struct Task
     {
-        Task(RequestType type, int id)
-            : type(type),
-              id(id),
-              mark_failed(false),
-              transferred_bytes(0),
-              total_packets(0),
-              success_packets(0),
-              failed_packets(0) {}
+        Task(RequestType type, int id) : type(type), id(id) {}
+        ~Task()
+        {
+            for (auto &request : request_list)
+                delete request;
+            request_list.clear();
+        }
 
-        RequestType type;
-        TaskID id;
-        bool mark_failed;
-        std::atomic<size_t> transferred_bytes;
+        const RequestType type;
+        const TaskID id;
 
-        Attributes attributes;
-        std::vector<std::string> target_list;
-        std::vector<Buffer> buffer_list;
-
-        RapidTransfer::OnReceiveEndCallback on_success, on_failure;
-
-        int total_packets;
-        std::atomic<int> success_packets, failed_packets;
+        std::vector<Request *> request_list;
     };
 
     struct RdmaReliableProtocol : public Protocol
@@ -54,46 +44,42 @@ namespace rapid
 
         virtual int deconstruct();
 
-        virtual TaskID allocateTask(RequestType type);
+        virtual int prepareConnection(const std::string &peer_name, Attributes &local);
 
-        virtual int freeTask(TaskID task_id);
+        virtual int setupConnection(const std::string &peer_name, const Attributes &peer);
 
-        virtual int prepareSend(TaskID task_id,
-                                std::vector<Attributes> &request_list,
-                                const std::vector<std::string> &target_list,
-                                const Attributes &attributes,
-                                const std::vector<Buffer> &buffers);
+        virtual TaskID send(const std::vector<std::string> &peer_name_list,
+                            const std::vector<Buffer> &buffers);
 
-        virtual int issueSend(TaskID task_id, const std::vector<Attributes> &response_list);
-
-        virtual int prepareReceive(TaskID task_id,
-                                   const Attributes &request,
-                                   Attributes &response,
-                                   const RapidTransfer::OnReceiveBeginCallback &on_receive_begin);
-
-        virtual int setFailedStatus(TaskID task_id);
+        virtual TaskID receive(const std::string &peer_name,
+                               const std::vector<Buffer> &buffer_list);
 
         virtual Status getStatus(TaskID task_id, size_t *transferred_bytes);
+
+        virtual int freeTask(TaskID task_id);
 
         virtual int registerLocalMemory(void *addr, size_t length);
 
         virtual int unregisterLocalMemory(void *addr);
 
     public:
+        std::shared_ptr<Task> allocateTask(RequestType type);
+
         std::shared_ptr<Task> getTaskById(TaskID task_id);
 
-        void runPollWorker();
+        void runBackgroundWorker();
 
     public:
         bool valid_;
+
         std::atomic<int> next_task_id_;
         RWSpinlock task_map_lock_;
         std::unordered_map<TaskID, std::shared_ptr<Task>> task_map_;
 
         RdmaContext context_;
 
-        std::atomic<bool> poll_worker_running_;
-        std::thread poll_worker_;
+        std::atomic<bool> background_running_;
+        std::thread background_worker_;
     };
 }
 

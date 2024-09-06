@@ -4,6 +4,7 @@
 #ifndef SESSION_MANAGER_H
 #define SESSION_MANAGER_H
 
+#include "concurrency.h"
 #include "rapid_transfer.h"
 
 #include <atomic>
@@ -18,7 +19,8 @@ namespace rapid
         using OnAcceptCallback = std::function<int(const Attributes &, Attributes &)>;
 
         SessionManager() : listen_running_(false), listen_fd_(-1) {}
-        virtual ~SessionManager() { shutdownListener(); }
+
+        virtual ~SessionManager();
         SessionManager(const SessionManager &) = delete;
         SessionManager &operator=(const SessionManager &) = delete;
 
@@ -28,22 +30,35 @@ namespace rapid
 
         int connect(const std::string &address, const Attributes &request, Attributes &response);
 
+        int disconnect(const std::string &address);
+
+        bool hasConnection(const std::string &address);
+
     private:
         void listener();
 
-        int postRequest(struct addrinfo *addr,
-                        const Attributes &request,
-                        Attributes &response);
+        int makeConnect(const std::string &address);
+
+        int sendRPC(int fd, const Attributes &request, Attributes &response);
 
         int readAttributes(int fd, Attributes &attr);
 
         int writeAttributes(int fd, const Attributes &attr);
 
     private:
+        struct Session
+        {
+            int fd;
+            // Others TBD
+        };
+
         std::atomic<bool> listen_running_;
         int listen_fd_;
         std::thread listen_thread_;
         OnAcceptCallback on_accept_;
+
+        RWSpinlock session_map_lock_;
+        std::unordered_map<std::string, Session> session_map_;
     };
 }
 

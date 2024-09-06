@@ -19,8 +19,9 @@ namespace rapid
         void *addr;
         size_t length;
         uint32_t lkey;
-        Task *task;
         volatile int *qp_depth;
+        volatile Status status;
+        std::string peer_name;
     };
 
     class RdmaEndPoint
@@ -38,17 +39,14 @@ namespace rapid
 
         ~RdmaEndPoint();
 
-        int construct(ibv_cq *cq,
+        int construct(ibv_cq *send_cq,
+                      ibv_cq *recv_cq,
                       size_t num_qp_list = 2,
                       size_t max_sge = 4,
                       size_t max_wr = 256,
                       size_t max_inline = 64);
 
         int deconstruct();
-
-        bool active() const { return active_; }
-
-        void set_active(bool flag) { active_ = flag; }
 
     public:
         bool connected() const
@@ -68,7 +66,9 @@ namespace rapid
 
         int setupConnection(int qp_index, const std::string &peer_gid, uint16_t peer_lid, uint32_t peer_qp_num);
 
-        int postRequest(RequestType type, const std::vector<Request *> &request_list);
+        int postSendRequest(const std::vector<Request *> &request_list);
+
+        int postReceiveRequest(const std::vector<Request *> &request_list);
 
     private:
         RdmaContext &context_;
@@ -79,7 +79,7 @@ namespace rapid
 
         std::string peer_nic_path_;
 
-        volatile int *wr_depth_list_;
+        volatile int *send_wr_depth_list_, *recv_wr_depth_list_;
         int max_wr_depth_;
 
         volatile bool active_;
