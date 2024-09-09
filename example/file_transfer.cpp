@@ -1,4 +1,4 @@
-// rapid_transfer.cpp
+// file_transfer.cpp
 //
 // Samples code for RapidTransfer, providing option to transfer data from disk to disk
 //
@@ -7,6 +7,7 @@
 #include "rapid_transfer.h"
 
 #include <atomic>
+#include <cassert>
 #include <csignal>
 #include <fcntl.h>
 #include <future>
@@ -89,20 +90,10 @@ static inline ssize_t readFully(int fd, void *buf, size_t len)
     return len;
 }
 
-std::function<void()> cleanup_func;
-
-void signalHandler(int signum)
-{
-    LOG(INFO) << "Interrupt signal (" << signum << ") received";
-    if (cleanup_func)
-        cleanup_func();
-    exit(signum);
-}
-
 int receiver()
 {
     auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device);
-    LOG_ASSERT(engine);
+    assert(engine);
 
     const size_t dram_buffer_size = 1ull << 30;
     void *addr = allocateMemoryPool(dram_buffer_size, 0);
@@ -121,14 +112,20 @@ int receiver()
     }
 
     std::mutex mutex;
-    TaskID task_id;
     std::string peer_name;
-    uint64_t length = 0, packet_length = 0;
-    int packet_index = 0;
-    auto on_new_connection = [&](const std::string &peer_name_, bool is_join) {
+
+    TaskID task_id;
+    uint64_t length = UINT64_MAX, packet_length = 0;
+    auto on_new_connection = [&](const std::string &peer_name_, bool is_join)
+    {
+        if (!is_join || !peer_name.empty())
+        {
+            LOG(INFO) << "The receiver can accept only one connection";
+            return;
+        }
         LOG(INFO) << "Arriving connection: " << peer_name_;
-        peer_name = peer_name_;;
         mutex.lock();
+        peer_name = peer_name_;
         task_id = engine->receive(peer_name, {{addr, sizeof(uint64_t)}});
         mutex.unlock();
     };
@@ -142,7 +139,7 @@ int receiver()
         return -1;
     }
 
-    cleanup_func = [&]()
+    auto cleanup = [&]()
     {
         engine->shutdownListener();
         engine->unregisterLocalMemory(addr);
@@ -152,11 +149,11 @@ int receiver()
     int fd = -1;
     if (!FLAGS_path.empty())
     {
-        fd = open(FLAGS_path.c_str(), O_RDWR);
+        fd = open(FLAGS_path.c_str(), O_RDWR | O_TRUNC | O_CREAT, 0644);
         if (fd < 0)
         {
             LOG(ERROR) << "Failed to open file " << FLAGS_path;
-            cleanup_func();
+            cleanup();
             return -1;
         }
     }
@@ -164,39 +161,58 @@ int receiver()
     while (true)
     {
         mutex.lock();
-        auto my_task_id = task_id;
-        mutex.unlock();
-        if (engine->getStatus(my_task_id, nullptr) == SUCCESS)
+        if (peer_name.empty())
         {
-            if (packet_index == 0)
+            mutex.unlock();
+            continue;
+        }
+        mutex.unlock();
+        if (task_id < 0)
+        {
+            LOG(INFO) << "Illegal task ID";
+            cleanup();
+            return -1;
+        }
+
+        auto status = engine->getStatus(task_id, nullptr);
+        if (status == SUCCESS)
+        {
+            if (length == UINT64_MAX)
+            {
                 length = *(uint64_t *)addr;
+                assert(length > 0 && length < (32ull << 30));
+            }
             else
             {
-                if ((ssize_t) packet_length != writeFully(fd, addr, packet_length))
+                if ((ssize_t)packet_length != writeFully(fd, addr, packet_length))
                 {
-                    LOG(ERROR) << "I/O error";
-                    cleanup_func();
+                    cleanup();
                     return -1;
                 }
             }
 
             packet_length = std::min(length, dram_buffer_size);
             length -= packet_length;
-            engine->freeTask(my_task_id);
+            engine->freeTask(task_id);
             if (!packet_length)
                 break;
-            my_task_id = engine->receive(peer_name, {{addr, packet_length}});
+            task_id = engine->receive(peer_name, {{addr, packet_length}});
+        }
+        else if (status == FAILED)
+        {
+            cleanup();
+            return -1;
         }
     }
 
-    cleanup_func();
+    cleanup();
     return 0;
 }
 
 int sender()
 {
     auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device);
-    LOG_ASSERT(engine);
+    assert(engine);
 
     const size_t dram_buffer_size = 1ull << 30;
     void *addr = allocateMemoryPool(dram_buffer_size, 0);
@@ -214,6 +230,12 @@ int sender()
         return -1;
     }
 
+    auto cleanup = [&]()
+    {
+        engine->unregisterLocalMemory(addr);
+        freeMemoryPool(addr, dram_buffer_size);
+    };
+
     std::string path = FLAGS_path;
     size_t file_size = dram_buffer_size;
     int fd = -1;
@@ -223,7 +245,7 @@ int sender()
         ret = stat(path.c_str(), &st);
         if (ret)
             PLOG(WARNING) << "Failed to stat file: " << path << ", fallback to send dummy data";
-        else if (st.st_mode != S_IFREG)
+        else if (!(st.st_mode & S_IFREG))
             LOG(WARNING) << "Not a regular file: " << path << ", fallback to send dummy data";
         else
         {
@@ -232,11 +254,35 @@ int sender()
             if (fd < 0)
             {
                 LOG(ERROR) << "Failed to open file";
-                engine->unregisterLocalMemory(addr);
-                freeMemoryPool(addr, dram_buffer_size);
+                cleanup();
                 return -1;
             }
         }
+    }
+
+    auto wait_for_completion = [&](TaskID task_id)
+    {
+        while (true)
+        {
+            auto status = engine->getStatus(task_id, nullptr);
+            if (status == rapid::FAILED)
+            {
+                LOG(ERROR) << "Failed to send data to remote";
+                cleanup();
+                return -1;
+            }
+
+            if (status == rapid::SUCCESS)
+                return 0;
+        }
+    };
+
+    *(uint64_t *)addr = file_size;
+    TaskID task_id = engine->send({FLAGS_target}, {{addr, sizeof(uint64_t)}});
+    if (wait_for_completion(task_id))
+    {
+        cleanup();
+        return -1;
     }
 
     for (size_t offset = 0; offset < file_size; offset += dram_buffer_size)
@@ -247,26 +293,21 @@ int sender()
             if ((ssize_t)chunk_size != readFully(fd, addr, chunk_size))
             {
                 LOG(ERROR) << "Failed to read file fully";
+                cleanup();
                 return -1;
             }
         }
 
-        TaskID task = engine->send({FLAGS_target}, {{addr, chunk_size}});
-        while (true)
+        TaskID task_id = engine->send({FLAGS_target}, {{addr, chunk_size}});
+        if (wait_for_completion(task_id))
         {
-            auto status = engine->getStatus(task, nullptr);
-            if (status == rapid::FAILED)
-            {
-                LOG(ERROR) << "Failed to send data to remote";
-                return -1;
-            }
-
-            if (status == rapid::SUCCESS)
-                break;
+            cleanup();
+            return -1;
         }
     }
 
     LOG(INFO) << "Sending completed";
+    cleanup();
     return 0;
 }
 

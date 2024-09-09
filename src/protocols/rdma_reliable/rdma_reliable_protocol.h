@@ -49,7 +49,7 @@ namespace rapid
         virtual int setupConnection(const std::string &peer_name, const Attributes &peer);
 
         virtual TaskID send(const std::vector<std::string> &peer_name_list,
-                            const std::vector<Buffer> &buffers);
+                            const std::vector<Buffer> &buffer_list);
 
         virtual TaskID receive(const std::string &peer_name,
                                const std::vector<Buffer> &buffer_list);

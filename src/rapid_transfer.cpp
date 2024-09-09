@@ -150,7 +150,6 @@ namespace rapid
     {
         if (!session_manager_->hasConnection(peer_name))
         {
-            LOG(INFO) << "conn";
             Attributes request, response;
             int ret = protocol_->prepareConnection(peer_name, request);
             if (ret)

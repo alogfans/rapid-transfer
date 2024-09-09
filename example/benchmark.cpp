@@ -7,6 +7,7 @@
 #include "rapid_transfer.h"
 
 #include <atomic>
+#include <cassert>
 #include <csignal>
 #include <fcntl.h>
 #include <future>
@@ -38,58 +39,6 @@ static void freeMemoryPool(void *addr, size_t size)
     numa_free(addr, size);
 }
 
-static inline ssize_t writeFully(int fd, const void *buf, size_t len)
-{
-    char *pos = (char *)buf;
-    size_t nbytes = len;
-    while (nbytes)
-    {
-        ssize_t rc = write(fd, pos, nbytes);
-        if (rc < 0 && (errno == EAGAIN || errno == EINTR))
-            continue;
-        else if (rc < 0)
-        {
-            PLOG(ERROR) << "Socket write failed";
-            return rc;
-        }
-        else if (rc == 0)
-        {
-            LOG(WARNING) << "Socket write incompleted: expected " << len
-                         << " bytes, actual " << len - nbytes << " bytes";
-            return len - nbytes;
-        }
-        pos += rc;
-        nbytes -= rc;
-    }
-    return len;
-}
-
-static inline ssize_t readFully(int fd, void *buf, size_t len)
-{
-    char *pos = (char *)buf;
-    size_t nbytes = len;
-    while (nbytes)
-    {
-        ssize_t rc = read(fd, pos, nbytes);
-        if (rc < 0 && (errno == EAGAIN || errno == EINTR))
-            continue;
-        else if (rc < 0)
-        {
-            PLOG(ERROR) << "Socket read failed";
-            return rc;
-        }
-        else if (rc == 0)
-        {
-            LOG(WARNING) << "Socket read incompleted: expected " << len
-                         << " bytes, actual " << len - nbytes << " bytes";
-            return len - nbytes;
-        }
-        pos += rc;
-        nbytes -= rc;
-    }
-    return len;
-}
-
 static std::string getLocalHostname()
 {
     const static size_t kHostnameBufLength = 1024;
@@ -108,7 +57,7 @@ int receiveThread(int thread_id)
     uint16_t port = FLAGS_first_port + thread_id;
     std::string local_hostname = getLocalHostname() + std::to_string(port);
     auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname);
-    LOG_ASSERT(engine);
+    assert(engine);
 
     const size_t dram_buffer_size = 64 * 1024 * 1024;
     void *addr = allocateMemoryPool(dram_buffer_size, 0);
@@ -125,10 +74,11 @@ int receiveThread(int thread_id)
         freeMemoryPool(addr, dram_buffer_size);
         return -1;
     }
-    
+
     std::mutex mutex;
     std::unordered_map<std::string, TaskID> task_id_map;
-    auto on_new_connection = [&](const std::string &peer_name, bool is_join) {
+    auto on_new_connection = [&](const std::string &peer_name, bool is_join)
+    {
         LOG(INFO) << "Arriving connection: " << peer_name;
         mutex.lock();
         task_id_map[peer_name] = engine->receive(peer_name, {{addr, FLAGS_block_size}});
@@ -151,7 +101,14 @@ int receiveThread(int thread_id)
         mutex.unlock();
         for (auto &entry : task_id_map)
         {
-            if (engine->getStatus(entry.second, nullptr) == SUCCESS)
+            auto status = engine->getStatus(entry.second, nullptr);
+            if (status == rapid::FAILED)
+            {
+                LOG(ERROR) << "Failed to send data to remote";
+                break;
+            }
+
+            if (status == rapid::SUCCESS)
             {
                 engine->freeTask(entry.second);
                 entry.second = engine->receive(entry.first, {{addr, FLAGS_block_size}});
@@ -171,7 +128,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id)
     uint16_t port = FLAGS_first_port + thread_id;
     std::string local_hostname = getLocalHostname() + std::to_string(port);
     auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname);
-    LOG_ASSERT(engine);
+    assert(engine);
     uint64_t transferred_bytes = 0;
 
     const size_t dram_buffer_size = 64 * 1024 * 1024;
@@ -196,10 +153,16 @@ int sendThread(pthread_barrier_t *barrier, int thread_id)
     {
         uint16_t port = FLAGS_first_port + lrand48() % FLAGS_threads;
         auto target = FLAGS_target_hostname + ":" + std::to_string(port);
-        TaskID task = engine->send({target}, {{addr, chunk_size}});
+        TaskID task_id = engine->send({target}, {{addr, chunk_size}});
+        if (task_id < 0)
+        {
+            LOG(ERROR) << "Cannot post send request";
+            break;
+        }
+
         while (true)
         {
-            auto status = engine->getStatus(task, nullptr);
+            auto status = engine->getStatus(task_id, nullptr);
             if (status == rapid::FAILED)
             {
                 LOG(ERROR) << "Failed to send data to remote";
@@ -209,7 +172,8 @@ int sendThread(pthread_barrier_t *barrier, int thread_id)
             if (status == rapid::SUCCESS)
                 break;
         }
-        engine->freeTask(task);
+
+        engine->freeTask(task_id);
         transferred_bytes += chunk_size;
     }
     pthread_barrier_wait(barrier);
