@@ -13,22 +13,6 @@
 
 namespace rapid
 {
-    struct Task
-    {
-        Task(RequestType type, int id) : type(type), id(id) {}
-        ~Task()
-        {
-            for (auto &request : request_list)
-                delete request;
-            request_list.clear();
-        }
-
-        const RequestType type;
-        const TaskID id;
-
-        std::vector<Request *> request_list;
-    };
-
     struct RdmaReliableProtocol : public Protocol
     {
         RdmaReliableProtocol();
@@ -63,6 +47,22 @@ namespace rapid
         virtual int unregisterLocalMemory(void *addr);
 
     public:
+        struct Task
+        {
+            Task(RequestType type, int id) : type(type), id(id) {}
+            ~Task()
+            {
+                for (auto &request : request_list)
+                    delete request;
+                request_list.clear();
+            }
+
+            const RequestType type;
+            const TaskID id;
+
+            std::vector<Request *> request_list;
+        };
+
         std::shared_ptr<Task> allocateTask(RequestType type);
 
         std::shared_ptr<Task> getTaskById(TaskID task_id);

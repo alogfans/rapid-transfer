@@ -1,6 +1,6 @@
 // Copyright 2024 Feng Ren
 
-#include "rdma_reliable_protocol.h"
+#include "impl.h"
 
 #include <cassert>
 
@@ -24,29 +24,29 @@ namespace rapid
         return list;
     }
 
-    RdmaReliableProtocol::RdmaReliableProtocol()
+    RdmaUnreliableProtocol::RdmaUnreliableProtocol()
         : valid_(false), background_running_(false) {}
 
-    RdmaReliableProtocol::~RdmaReliableProtocol()
+    RdmaUnreliableProtocol::~RdmaUnreliableProtocol()
     {
         deconstruct();
     }
 
-    int RdmaReliableProtocol::construct(const std::string &local_hostname,
-                                        const std::string &device_name,
-                                        uint8_t rdma_port,
-                                        int gid_index)
+    int RdmaUnreliableProtocol::construct(const std::string &local_hostname,
+                                          const std::string &device_name,
+                                          uint8_t rdma_port,
+                                          int gid_index)
     {
         int ret = context_.construct(local_hostname, device_name, rdma_port, gid_index);
         if (ret)
             return ret;
         background_running_ = true;
-        background_worker_ = std::thread(&RdmaReliableProtocol::runBackgroundWorker, this);
+        background_worker_ = std::thread(&RdmaUnreliableProtocol::runBackgroundWorker, this);
         valid_ = true;
         return 0;
     }
 
-    int RdmaReliableProtocol::deconstruct()
+    int RdmaUnreliableProtocol::deconstruct()
     {
         if (!valid_)
             return 0;
@@ -57,7 +57,7 @@ namespace rapid
         return 0;
     }
 
-    int RdmaReliableProtocol::prepareConnection(const std::string &peer_name, Attributes &local)
+    int RdmaUnreliableProtocol::prepareConnection(const std::string &peer_name, Attributes &local)
     {
         auto endpoint = context_.getOrCreateEndpoint(peer_name);
         if (!endpoint)
@@ -69,7 +69,7 @@ namespace rapid
         return 0;
     }
 
-    int RdmaReliableProtocol::setupConnection(const std::string &peer_name, const Attributes &peer)
+    int RdmaUnreliableProtocol::setupConnection(const std::string &peer_name, const Attributes &peer)
     {
         auto endpoint = context_.getOrCreateEndpoint(peer_name);
         if (!endpoint)
@@ -85,7 +85,7 @@ namespace rapid
         return 0;
     }
 
-    int RdmaReliableProtocol::freeTask(TaskID task_id)
+    int RdmaUnreliableProtocol::freeTask(TaskID task_id)
     {
         task_map_lock_.lock();
         task_map_.erase(task_id);
@@ -93,8 +93,8 @@ namespace rapid
         return 0;
     }
 
-    TaskID RdmaReliableProtocol::send(const std::vector<std::string> &peer_name_list,
-                                      const std::vector<Buffer> &buffer_list)
+    TaskID RdmaUnreliableProtocol::send(const std::vector<std::string> &peer_name_list,
+                                        const std::vector<Buffer> &buffer_list)
     {
         auto task = allocateTask(SEND);
         if (!task)
@@ -137,8 +137,8 @@ namespace rapid
         return task->id;
     }
 
-    TaskID RdmaReliableProtocol::receive(const std::string &peer_name,
-                                         const std::vector<Buffer> &buffer_list)
+    TaskID RdmaUnreliableProtocol::receive(const std::string &peer_name,
+                                           const std::vector<Buffer> &buffer_list)
     {
         auto task = allocateTask(RECEIVE);
         if (!task)
@@ -178,7 +178,7 @@ namespace rapid
         return task->id;
     }
 
-    Status RdmaReliableProtocol::getStatus(TaskID task_id, size_t *transferred_bytes)
+    Status RdmaUnreliableProtocol::getStatus(TaskID task_id, size_t *transferred_bytes)
     {
         auto task = getTaskById(task_id);
         if (!task)
@@ -199,7 +199,7 @@ namespace rapid
         return summary;
     }
 
-    std::shared_ptr<Task> RdmaReliableProtocol::allocateTask(RequestType type)
+    std::shared_ptr<RdmaUnreliableProtocol::Task> RdmaUnreliableProtocol::allocateTask(RequestType type)
     {
         int task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
         auto task = std::make_shared<Task>(type, task_id);
@@ -211,7 +211,7 @@ namespace rapid
         return task;
     }
 
-    std::shared_ptr<Task> RdmaReliableProtocol::getTaskById(TaskID task_id)
+    std::shared_ptr<RdmaUnreliableProtocol::Task> RdmaUnreliableProtocol::getTaskById(TaskID task_id)
     {
         RWSpinlock::ReadGuard guard(task_map_lock_);
         if (!task_map_.count(task_id))
@@ -219,17 +219,17 @@ namespace rapid
         return task_map_[task_id];
     }
 
-    int RdmaReliableProtocol::registerLocalMemory(void *addr, size_t length)
+    int RdmaUnreliableProtocol::registerLocalMemory(void *addr, size_t length)
     {
         return context_.registerMemoryRegion(addr, length, IBV_ACCESS_LOCAL_WRITE);
     }
 
-    int RdmaReliableProtocol::unregisterLocalMemory(void *addr)
+    int RdmaUnreliableProtocol::unregisterLocalMemory(void *addr)
     {
         return context_.unregisterMemoryRegion(addr);
     }
 
-    void RdmaReliableProtocol::runBackgroundWorker()
+    void RdmaUnreliableProtocol::runBackgroundWorker()
     {
         const static size_t kPollCount = 64;
         while (background_running_)

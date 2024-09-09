@@ -2,7 +2,6 @@
 // Copyright (C) 2024 Feng Ren
 
 #include "rdma_endpoint.h"
-#include "protocols/rdma_reliable/rdma_reliable_protocol.h"
 
 #include <cassert>
 #include <cstddef>

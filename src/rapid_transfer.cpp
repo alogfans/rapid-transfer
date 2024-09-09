@@ -3,7 +3,8 @@
 
 #include "rapid_transfer.h"
 #include "protocol.h"
-#include "protocols/rdma_reliable/rdma_reliable_protocol.h"
+#include "protocols/rdma_reliable/impl.h"
+#include "protocols/rdma_unreliable/impl.h"
 #include "session_manager.h"
 
 namespace rapid
@@ -14,38 +15,40 @@ namespace rapid
                                                          uint8_t rdma_port,
                                                          int gid_index)
     {
+        auto engine = std::make_shared<RapidTransfer>(device_name);
+        engine->session_manager_ = new SessionManager();
         if (protocol == "rdma_reliable")
-        {
-            auto engine = std::make_shared<RapidTransfer>(device_name);
-            engine->session_manager_ = new SessionManager();
             engine->protocol_ = new RdmaReliableProtocol();
-
-            std::string actual_local_name = local_name;
-            if (actual_local_name.empty())
-            {
-                const static size_t kHostnameBufLength = 1024;
-                char hostname_buf[kHostnameBufLength];
-                int ret = gethostname(hostname_buf, kHostnameBufLength);
-                if (ret)
-                {
-                    PLOG(ERROR) << "Failed to get hostname";
-                    return nullptr;
-                }
-                actual_local_name = hostname_buf;
-            }
-
-            int ret = engine->protocol_->construct(actual_local_name, device_name, rdma_port, gid_index);
-            if (ret)
-            {
-                LOG(ERROR) << "Failed to construct protocol";
-                return nullptr;
-            }
-
-            return engine;
+        else if (protocol == "rdma_unreliable")
+            engine->protocol_ = new RdmaUnreliableProtocol();
+        else
+        {
+            LOG(ERROR) << "Unrecognized protocol";
+            return nullptr;
         }
 
-        LOG(ERROR) << "Unrecognized protocol";
-        return nullptr;
+        std::string actual_local_name = local_name;
+        if (actual_local_name.empty())
+        {
+            const static size_t kHostnameBufLength = 1024;
+            char hostname_buf[kHostnameBufLength];
+            int ret = gethostname(hostname_buf, kHostnameBufLength);
+            if (ret)
+            {
+                PLOG(ERROR) << "Failed to get hostname";
+                return nullptr;
+            }
+            actual_local_name = hostname_buf;
+        }
+
+        int ret = engine->protocol_->construct(actual_local_name, device_name, rdma_port, gid_index);
+        if (ret)
+        {
+            LOG(ERROR) << "Failed to construct protocol";
+            return nullptr;
+        }
+
+        return engine;
     }
 
     RapidTransfer::RapidTransfer(const std::string &device_name)
