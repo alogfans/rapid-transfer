@@ -123,7 +123,7 @@ namespace rapid
         session_map_.clear();
     }
 
-    int SessionManager::startListener(const std::string &address, const OnAcceptCallback &on_accept)
+    int SessionManager::startListener(const std::string &address, const OnAcceptCallback &on_accept, const OnErrorCallback &on_close)
     {
         std::string hostname;
         uint16_t port;
@@ -177,6 +177,7 @@ namespace rapid
 
         listen_fd_ = listen_fd;
         on_accept_ = on_accept;
+        on_error_ = on_close;
         listen_running_.exchange(true);
         listen_thread_ = std::thread(&SessionManager::listener, this);
         return 0;
@@ -185,6 +186,7 @@ namespace rapid
     void SessionManager::listener()
     {
         std::vector<pollfd> fd_list;
+        std::unordered_map<int, std::string> peer_name_map;
         pollfd listen_pollfd = {listen_fd_, POLLIN, 0};
         fd_list.push_back(listen_pollfd);
 
@@ -231,6 +233,8 @@ namespace rapid
                     int conn_fd = fd_list[i].fd;
                     if (!(fd_list[i].revents & POLLHUP))
                         PLOG(ERROR) << "poll error on conn fd " << conn_fd;
+                    on_error_(peer_name_map[conn_fd]);
+                    peer_name_map.erase(conn_fd);
                     close(conn_fd);
                     fd_list.erase(fd_list.begin() + i);
                     continue;
@@ -258,6 +262,8 @@ namespace rapid
                         fd_list.erase(fd_list.begin() + i);
                         continue;
                     }
+
+                    peer_name_map[conn_fd] = request["name"];
                 }
             }
         }

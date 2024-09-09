@@ -18,13 +18,15 @@ namespace rapid
     public:
         using OnAcceptCallback = std::function<int(const Attributes &, Attributes &)>;
 
+        using OnErrorCallback = std::function<void(const std::string &)>;
+
         SessionManager() : listen_running_(false), listen_fd_(-1) {}
 
         virtual ~SessionManager();
         SessionManager(const SessionManager &) = delete;
         SessionManager &operator=(const SessionManager &) = delete;
 
-        int startListener(const std::string &address, const OnAcceptCallback &on_accept);
+        int startListener(const std::string &address, const OnAcceptCallback &on_accept, const OnErrorCallback &on_error);
 
         int shutdownListener();
 
@@ -49,13 +51,14 @@ namespace rapid
         struct Session
         {
             int fd;
-            // Others TBD
         };
 
         std::atomic<bool> listen_running_;
         int listen_fd_;
         std::thread listen_thread_;
+
         OnAcceptCallback on_accept_;
+        OnErrorCallback on_error_;
 
         RWSpinlock session_map_lock_;
         std::unordered_map<std::string, Session> session_map_;

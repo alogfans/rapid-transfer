@@ -76,7 +76,7 @@ namespace rapid
 
     TaskID RapidTransfer::receive(const std::string &peer_name, const std::vector<Buffer> &buffer_list)
     {
-        // TODO
+        // No need to connect because this is called by listener
         int ret = protocol_->receive(peer_name, buffer_list);
         return ret;
     }
@@ -131,14 +131,13 @@ namespace rapid
             return 0;
         };
 
-        // TBD on closing callback
-        // auto on_close = [=]() -> void
-        // {
-        //     if (callback)
-        //         callback(peer_name, false);
-        // };
+        auto on_error = [=](const std::string &peer_name) -> void
+        {
+            if (callback)
+                callback(peer_name, false);
+        };
 
-        return session_manager_->startListener(listen_address, on_accept);
+        return session_manager_->startListener(listen_address, on_accept, on_error);
     }
 
     int RapidTransfer::shutdownListener()
