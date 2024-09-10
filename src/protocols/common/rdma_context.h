@@ -20,7 +20,8 @@
 
 namespace rapid
 {
-    class RdmaEndPoint;
+    class RdmaRCEndPoint;
+    class RdmaRCEndPointStore;
 
     const static std::string NIC_PATH_DELIM = "@";
 
@@ -77,9 +78,9 @@ namespace rapid
         void set_active(bool flag) { active_ = flag; }
 
     public:
-        std::shared_ptr<RdmaEndPoint> getOrCreateEndpoint(const std::string &peer_nic_path);
+        std::shared_ptr<RdmaRCEndPoint> getOrCreateRCEndpoint(const std::string &peer_nic_path);
 
-        int deleteEndpoint(const std::string &peer_nic_path);
+        int deleteRCEndpoint(const std::string &peer_nic_path);
 
     public:
         std::string nicPath() const { return MakeNicPath(local_hostname_, device_name_); }
@@ -113,6 +114,8 @@ namespace rapid
 
         int socketId();
 
+        ibv_cq *cq(int type) { return cq_list_[type]; }
+
         std::string localHostname() const { return local_hostname_; }
 
     private:
@@ -138,8 +141,7 @@ namespace rapid
         ibv_mtu active_mtu_;
         ibv_gid gid_;
 
-        RWSpinlock endpoint_map_lock_;
-        std::unordered_map<std::string, std::shared_ptr<RdmaEndPoint>> endpoint_map_;
+        std::shared_ptr<RdmaRCEndPointStore> rc_endpoint_store_;
 
         RWSpinlock memory_regions_lock_;
         std::vector<ibv_mr *> memory_region_list_;

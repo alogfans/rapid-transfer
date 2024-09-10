@@ -2,7 +2,8 @@
 // Copyright (C) 2024 Feng Ren
 
 #include "rdma_context.h"
-#include "rdma_endpoint.h"
+#include "rdma_rc_endpoint.h"
+#include "rdma_rc_endpoint_store.h"
 
 #include <atomic>
 #include <cassert>
@@ -29,6 +30,7 @@ namespace rapid
                 PLOG(ERROR) << "RDMA context setup failed: fork compatibility";
         };
         std::call_once(g_once_flag, fork_init);
+        rc_endpoint_store_ = std::make_shared<RdmaRCEndPointStore>(*this);
     }
 
     RdmaContext::~RdmaContext()
@@ -136,7 +138,7 @@ namespace rapid
 
     int RdmaContext::deconstruct()
     {
-        endpoint_map_.clear();
+        rc_endpoint_store_.reset();
 
         for (auto &entry : memory_region_list_)
             if (ibv_dereg_mr(entry))
@@ -255,43 +257,19 @@ namespace rapid
         return {0, 0};
     }
 
-    std::shared_ptr<RdmaEndPoint> RdmaContext::getOrCreateEndpoint(const std::string &peer_nic_path)
+    std::shared_ptr<RdmaRCEndPoint> RdmaContext::getOrCreateRCEndpoint(const std::string &peer_nic_path)
     {
         if (!active_)
         {
             LOG(ERROR) << "Endpoint is not active";
             return nullptr;
         }
-
-        if (peer_nic_path.empty())
-        {
-            LOG(ERROR) << "Invalid peer NIC path";
-            return nullptr;
-        }
-
-        {
-            RWSpinlock::ReadGuard guard(endpoint_map_lock_);
-            if (endpoint_map_.count(peer_nic_path))
-                return endpoint_map_[peer_nic_path];
-        }
-
-        RWSpinlock::WriteGuard guard(endpoint_map_lock_);
-        if (endpoint_map_.count(peer_nic_path))
-            return endpoint_map_[peer_nic_path];
-
-        auto endpoint = std::make_shared<RdmaEndPoint>(*this);
-        int ret = endpoint->construct(cq_list_[SEND_CQ], cq_list_[RECV_CQ]);
-        if (ret)
-            return nullptr;
-        endpoint_map_[peer_nic_path] = endpoint;
-        return endpoint;
+        return rc_endpoint_store_->getOrCreateEndpoint(peer_nic_path);
     }
 
-    int RdmaContext::deleteEndpoint(const std::string &peer_nic_path)
+    int RdmaContext::deleteRCEndpoint(const std::string &peer_nic_path)
     {
-        RWSpinlock::WriteGuard guard(endpoint_map_lock_);
-        endpoint_map_.erase(peer_nic_path);
-        return 0;
+        return rc_endpoint_store_->deleteEndpoint(peer_nic_path);
     }
 
     std::string RdmaContext::gid() const

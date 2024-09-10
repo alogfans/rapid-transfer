@@ -1,7 +1,7 @@
-// rdma_endpoint.cpp
+// rdma_rc_endpoint.cpp
 // Copyright (C) 2024 Feng Ren
 
-#include "rdma_endpoint.h"
+#include "rdma_rc_endpoint.h"
 
 #include <cassert>
 #include <cstddef>
@@ -13,22 +13,22 @@ namespace rapid
     const static uint8_t TIMEOUT = 14;
     const static uint8_t RETRY_CNT = 7;
 
-    RdmaEndPoint::RdmaEndPoint(RdmaContext &context)
+    RdmaRCEndPoint::RdmaRCEndPoint(RdmaContext &context)
         : context_(context),
           status_(INITIALIZING) {}
 
-    RdmaEndPoint::~RdmaEndPoint()
+    RdmaRCEndPoint::~RdmaRCEndPoint()
     {
         if (!qp_list_.empty())
             deconstruct();
     }
 
-    int RdmaEndPoint::construct(ibv_cq *send_cq,
-                                ibv_cq *recv_cq,
-                                size_t num_qp_list,
-                                size_t max_sge_per_wr,
-                                size_t max_wr_depth,
-                                size_t max_inline_bytes)
+    int RdmaRCEndPoint::construct(ibv_cq *send_cq,
+                                  ibv_cq *recv_cq,
+                                  size_t num_qp_list,
+                                  size_t max_sge_per_wr,
+                                  size_t max_wr_depth,
+                                  size_t max_inline_bytes)
     {
         if (status_.load(std::memory_order_relaxed) != INITIALIZING)
         {
@@ -36,16 +36,11 @@ namespace rapid
             return -1;
         }
 
-        qp_list_.resize(num_qp_list);
-
         max_wr_depth_ = (int)max_wr_depth;
+        qp_list_.resize(num_qp_list);
         send_wr_depth_list_ = new volatile int[num_qp_list];
         recv_wr_depth_list_ = new volatile int[num_qp_list];
-        if (!send_wr_depth_list_ || !recv_wr_depth_list_)
-        {
-            PLOG(ERROR) << "Failed to allocate memory for work request depth list";
-            return -1;
-        }
+
         for (size_t i = 0; i < num_qp_list; ++i)
         {
             send_wr_depth_list_[i] = 0;
@@ -71,7 +66,7 @@ namespace rapid
         return 0;
     }
 
-    int RdmaEndPoint::deconstruct()
+    int RdmaRCEndPoint::deconstruct()
     {
         for (size_t i = 0; i < qp_list_.size(); ++i)
         {
@@ -87,45 +82,12 @@ namespace rapid
         qp_list_.clear();
         delete[] send_wr_depth_list_;
         delete[] recv_wr_depth_list_;
+        send_wr_depth_list_ = nullptr;
+        recv_wr_depth_list_ = nullptr;
         return 0;
     }
 
-    int RdmaEndPoint::destroyQP()
-    {
-        return deconstruct();
-    }
-
-    void RdmaEndPoint::disconnect()
-    {
-        RWSpinlock::WriteGuard guard(lock_);
-        disconnectUnlocked();
-    }
-
-    void RdmaEndPoint::disconnectUnlocked()
-    {
-        for (size_t i = 0; i < qp_list_.size(); ++i)
-        {
-            if (send_wr_depth_list_[i] || recv_wr_depth_list_[i])
-                PLOG(WARNING) << "Outstanding work requests found, CQ will not be generated";
-        }
-        ibv_qp_attr attr;
-        memset(&attr, 0, sizeof(attr));
-        attr.qp_state = IBV_QPS_RESET;
-        for (size_t i = 0; i < qp_list_.size(); ++i)
-        {
-            if (ibv_modify_qp(qp_list_[i], &attr, IBV_QP_STATE))
-                PLOG(ERROR) << "Failed to modity QP to RESET";
-        }
-        peer_nic_path_.clear();
-        for (size_t i = 0; i < qp_list_.size(); ++i)
-        {
-            send_wr_depth_list_[i] = 0;
-            recv_wr_depth_list_[i] = 0;
-        }
-        status_.store(UNCONNECTED, std::memory_order_release);
-    }
-
-    int RdmaEndPoint::postSendRequest(const std::vector<Request *> &request_list)
+    int RdmaRCEndPoint::postSendRequest(const std::vector<Request *> &request_list)
     {
         int qp_index = 0;
         int wr_count = std::min(max_wr_depth_ - send_wr_depth_list_[qp_index], (int)request_list.size());
@@ -172,7 +134,7 @@ namespace rapid
         return wr_count;
     }
 
-    int RdmaEndPoint::postReceiveRequest(const std::vector<Request *> &request_list)
+    int RdmaRCEndPoint::postReceiveRequest(const std::vector<Request *> &request_list)
     {
         int qp_index = 0;
         int wr_count = std::min(max_wr_depth_ - recv_wr_depth_list_[qp_index], (int)request_list.size());
@@ -217,7 +179,7 @@ namespace rapid
         return wr_count;
     }
 
-    std::vector<uint32_t> RdmaEndPoint::qpNum() const
+    std::vector<uint32_t> RdmaRCEndPoint::qpNum() const
     {
         std::vector<uint32_t> ret;
         for (int qp_index = 0; qp_index < (int)qp_list_.size(); ++qp_index)
@@ -225,7 +187,7 @@ namespace rapid
         return ret;
     }
 
-    int RdmaEndPoint::setupConnection(const std::string &peer_gid, uint16_t peer_lid, std::vector<uint32_t> peer_qp_num_list)
+    int RdmaRCEndPoint::setupConnection(const std::string &peer_gid, uint16_t peer_lid, std::vector<uint32_t> peer_qp_num_list)
     {
         if (qp_list_.size() != peer_qp_num_list.size())
         {
@@ -245,7 +207,7 @@ namespace rapid
         return 0;
     }
 
-    int RdmaEndPoint::setupConnection(int qp_index, const std::string &peer_gid, uint16_t peer_lid, uint32_t peer_qp_num)
+    int RdmaRCEndPoint::setupConnection(int qp_index, const std::string &peer_gid, uint16_t peer_lid, uint32_t peer_qp_num)
     {
         if (qp_index < 0 || qp_index > (int)qp_list_.size())
             return -1;

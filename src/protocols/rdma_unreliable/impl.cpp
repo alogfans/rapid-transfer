@@ -59,7 +59,7 @@ namespace rapid
 
     int RdmaUnreliableProtocol::prepareConnection(const std::string &peer_name, Attributes &local)
     {
-        auto endpoint = context_.getOrCreateEndpoint(peer_name);
+        auto endpoint = context_.getOrCreateRCEndpoint(peer_name);
         if (!endpoint)
             return -1;
         local["name"] = context_.localHostname();
@@ -71,7 +71,7 @@ namespace rapid
 
     int RdmaUnreliableProtocol::setupConnection(const std::string &peer_name, const Attributes &peer)
     {
-        auto endpoint = context_.getOrCreateEndpoint(peer_name);
+        auto endpoint = context_.getOrCreateRCEndpoint(peer_name);
         if (!endpoint)
             return -1;
         if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp"))
@@ -121,7 +121,7 @@ namespace rapid
                 task->request_list.push_back(request);
             }
 
-            auto endpoint = context_.getOrCreateEndpoint(peer_name);
+            auto endpoint = context_.getOrCreateRCEndpoint(peer_name);
             if (!endpoint || !endpoint->connected())
                 return -1;
 
@@ -163,7 +163,7 @@ namespace rapid
             task->request_list.push_back(request);
         }
 
-        auto endpoint = context_.getOrCreateEndpoint(peer_name);
+        auto endpoint = context_.getOrCreateRCEndpoint(peer_name);
         if (!endpoint || !endpoint->connected())
             return -1;
 
@@ -256,7 +256,7 @@ namespace rapid
                                    << ", lkey: " << request->lkey
                                    << ", local_nic: " << context_.deviceName()
                                    << "): " << ibv_wc_status_str(wc[i].status);
-                        context_.deleteEndpoint(request->peer_name);
+                        context_.deleteRCEndpoint(request->peer_name);
                         request->status = FAILED;
                     }
                     else

@@ -6,7 +6,7 @@
 #include "concurrency.h"
 #include "protocol.h"
 #include "protocols/common/rdma_context.h"
-#include "protocols/common/rdma_endpoint.h"
+#include "protocols/common/rdma_rc_endpoint.h"
 
 #include <atomic>
 #include <mutex>
