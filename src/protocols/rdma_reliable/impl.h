@@ -7,6 +7,7 @@
 #include "protocol.h"
 #include "protocols/common/rdma_context.h"
 #include "protocols/common/rdma_rc_endpoint.h"
+#include "protocols/common/rdma_rc_endpoint_store.h"
 
 #include <atomic>
 #include <mutex>
@@ -69,6 +70,8 @@ namespace rapid
 
         void runBackgroundWorker();
 
+        int poll(int cq_index);
+
     public:
         bool valid_;
 
@@ -77,6 +80,7 @@ namespace rapid
         std::unordered_map<TaskID, std::shared_ptr<Task>> task_map_;
 
         RdmaContext context_;
+        RdmaRCEndPointStore endpoint_store_;
 
         std::atomic<bool> background_running_;
         std::thread background_worker_;

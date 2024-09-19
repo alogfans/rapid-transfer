@@ -64,6 +64,8 @@ namespace rapid
         qp_list_.clear();
         delete[] send_wr_depth_list_;
         delete[] recv_wr_depth_list_;
+        send_wr_depth_list_ = nullptr;
+        recv_wr_depth_list_ = nullptr;
         return 0;
     }
 

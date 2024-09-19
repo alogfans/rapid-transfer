@@ -17,7 +17,7 @@ namespace rapid
 
         int construct(ibv_cq *send_cq,
                       ibv_cq *recv_cq,
-                      size_t num_qp_list = 2,
+                      size_t num_qp_list = 1,
                       size_t max_sge = 4,
                       size_t max_wr = 256,
                       size_t max_inline = 64);
@@ -54,12 +54,8 @@ namespace rapid
         RWSpinlock lock_;
         std::vector<ibv_qp *> qp_list_;
 
-        std::string peer_nic_path_;
-
         volatile int *send_wr_depth_list_, *recv_wr_depth_list_;
         int max_wr_depth_;
-
-        volatile bool active_;
     };
 
 }

@@ -30,7 +30,6 @@ namespace rapid
                 PLOG(ERROR) << "RDMA context setup failed: fork compatibility";
         };
         std::call_once(g_once_flag, fork_init);
-        rc_endpoint_store_ = std::make_shared<RdmaRCEndPointStore>(*this);
     }
 
     RdmaContext::~RdmaContext()
@@ -138,8 +137,6 @@ namespace rapid
 
     int RdmaContext::deconstruct()
     {
-        rc_endpoint_store_.reset();
-
         for (auto &entry : memory_region_list_)
             if (ibv_dereg_mr(entry))
                 PLOG(ERROR) << "Fail to unregister memory region";
@@ -255,21 +252,6 @@ namespace rapid
 
         LOG(ERROR) << "Address " << addr << " lkey not found for " << deviceName();
         return {0, 0};
-    }
-
-    std::shared_ptr<RdmaRCEndPoint> RdmaContext::getOrCreateRCEndpoint(const std::string &peer_nic_path)
-    {
-        if (!active_)
-        {
-            LOG(ERROR) << "Endpoint is not active";
-            return nullptr;
-        }
-        return rc_endpoint_store_->getOrCreateEndpoint(peer_nic_path);
-    }
-
-    int RdmaContext::deleteRCEndpoint(const std::string &peer_nic_path)
-    {
-        return rc_endpoint_store_->deleteEndpoint(peer_nic_path);
     }
 
     std::string RdmaContext::gid() const

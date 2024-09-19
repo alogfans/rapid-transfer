@@ -25,7 +25,7 @@ namespace rapid
     }
 
     RdmaReliableProtocol::RdmaReliableProtocol()
-        : valid_(false), background_running_(false) {}
+        : valid_(false), endpoint_store_(context_), background_running_(false) {}
 
     RdmaReliableProtocol::~RdmaReliableProtocol()
     {
@@ -59,7 +59,7 @@ namespace rapid
 
     int RdmaReliableProtocol::prepareConnection(const std::string &peer_name, Attributes &local)
     {
-        auto endpoint = context_.getOrCreateRCEndpoint(peer_name);
+        auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
         if (!endpoint)
             return -1;
         local["name"] = context_.localHostname();
@@ -71,7 +71,7 @@ namespace rapid
 
     int RdmaReliableProtocol::setupConnection(const std::string &peer_name, const Attributes &peer)
     {
-        auto endpoint = context_.getOrCreateRCEndpoint(peer_name);
+        auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
         if (!endpoint)
             return -1;
         if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp"))
@@ -121,7 +121,7 @@ namespace rapid
                 task->request_list.push_back(request);
             }
 
-            auto endpoint = context_.getOrCreateRCEndpoint(peer_name);
+            auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
             if (!endpoint || !endpoint->connected())
                 return -1;
 
@@ -163,7 +163,7 @@ namespace rapid
             task->request_list.push_back(request);
         }
 
-        auto endpoint = context_.getOrCreateRCEndpoint(peer_name);
+        auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
         if (!endpoint || !endpoint->connected())
             return -1;
 
@@ -231,38 +231,42 @@ namespace rapid
 
     void RdmaReliableProtocol::runBackgroundWorker()
     {
-        const static size_t kPollCount = 64;
         while (background_running_)
         {
-            for (int cq_index = 0; cq_index < 2; cq_index++)
-            {
-                ibv_wc wc[kPollCount];
-                int nr_poll = context_.poll(kPollCount, wc, cq_index);
-                if (nr_poll < 0)
-                {
-                    LOG(ERROR) << "Worker: Failed to poll completion queues";
-                    continue;
-                }
-
-                for (int i = 0; i < nr_poll; ++i)
-                {
-                    auto request = (Request *)wc[i].wr_id;
-                    assert(request);
-                    __sync_fetch_and_sub(request->qp_depth, 1);
-                    if (wc[i].status != IBV_WC_SUCCESS)
-                    {
-                        LOG(ERROR) << "Worker: Process failed for slice (addr: " << request->addr
-                                   << ", length: " << request->length
-                                   << ", lkey: " << request->lkey
-                                   << ", local_nic: " << context_.deviceName()
-                                   << "): " << ibv_wc_status_str(wc[i].status);
-                        context_.deleteRCEndpoint(request->peer_name);
-                        request->status = FAILED;
-                    }
-                    else
-                        request->status = SUCCESS;
-                }
-            }
+            poll(SEND);
+            poll(RECEIVE);
         }
+    }
+
+    int RdmaReliableProtocol::poll(int cq_index)
+    {
+        const static size_t kPollCount = 64;
+        ibv_wc wc[kPollCount];
+        int nr_poll = context_.poll(kPollCount, wc, cq_index);
+        if (nr_poll < 0)
+        {
+            LOG(ERROR) << "Worker: Failed to poll completion queues";
+            return -1;
+        }
+
+        for (int i = 0; i < nr_poll; ++i)
+        {
+            auto request = (Request *)wc[i].wr_id;
+            __sync_fetch_and_sub(request->qp_depth, 1);
+            if (wc[i].status != IBV_WC_SUCCESS)
+            {
+                LOG(ERROR) << "Worker: Process failed for slice (addr: " << request->addr
+                           << ", length: " << request->length
+                           << ", lkey: " << request->lkey
+                           << ", local_nic: " << context_.deviceName()
+                           << "): " << ibv_wc_status_str(wc[i].status);
+                endpoint_store_.deleteEndpoint(request->peer_name);
+                request->status = FAILED;
+            }
+            else
+                request->status = SUCCESS;
+        }
+
+        return 0;
     }
 }

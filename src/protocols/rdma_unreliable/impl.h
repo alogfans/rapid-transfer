@@ -6,7 +6,10 @@
 #include "concurrency.h"
 #include "protocol.h"
 #include "protocols/common/rdma_context.h"
-#include "protocols/common/rdma_rc_endpoint.h"
+#include "protocols/common/rdma_ud_endpoint.h"
+#include "protocols/common/rdma_ud_endpoint_store.h"
+
+#include "worker.h"
 
 #include <atomic>
 #include <mutex>
@@ -47,39 +50,10 @@ namespace rapid
         virtual int unregisterLocalMemory(void *addr);
 
     public:
-        struct Task
-        {
-            Task(RequestType type, int id) : type(type), id(id) {}
-            ~Task()
-            {
-                for (auto &request : request_list)
-                    delete request;
-                request_list.clear();
-            }
-
-            const RequestType type;
-            const TaskID id;
-
-            std::vector<Request *> request_list;
-        };
-
-        std::shared_ptr<Task> allocateTask(RequestType type);
-
-        std::shared_ptr<Task> getTaskById(TaskID task_id);
-
-        void runBackgroundWorker();
-
-    public:
         bool valid_;
-
-        std::atomic<int> next_task_id_;
-        RWSpinlock task_map_lock_;
-        std::unordered_map<TaskID, std::shared_ptr<Task>> task_map_;
-
         RdmaContext context_;
-
-        std::atomic<bool> background_running_;
-        std::thread background_worker_;
+        RdmaUDEndPointStore endpoint_store_;
+        RdmaUnreliableWorker background_worker_;
     };
 }
 

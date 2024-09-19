@@ -78,11 +78,6 @@ namespace rapid
         void set_active(bool flag) { active_ = flag; }
 
     public:
-        std::shared_ptr<RdmaRCEndPoint> getOrCreateRCEndpoint(const std::string &peer_nic_path);
-
-        int deleteRCEndpoint(const std::string &peer_nic_path);
-
-    public:
         std::string nicPath() const { return MakeNicPath(local_hostname_, device_name_); }
 
         std::string deviceName() const { return device_name_; }
@@ -140,8 +135,6 @@ namespace rapid
         int active_speed_ = -1;
         ibv_mtu active_mtu_;
         ibv_gid gid_;
-
-        std::shared_ptr<RdmaRCEndPointStore> rc_endpoint_store_;
 
         RWSpinlock memory_regions_lock_;
         std::vector<ibv_mr *> memory_region_list_;
