@@ -33,7 +33,7 @@ namespace rapid
             return -1;
         }
         auto remote_qpn = peer_qp_num_list_[lrand48() % peer_qp_num_list_.size()];
-        return store_.postSendRequest(request_list, ah_, peer_qp_num_list_[remote_qpn]);
+        return store_.postSendRequest(request_list, ah_, remote_qpn);
     }
 
     int RdmaUDEndPoint::postReceiveRequest(const std::vector<Request *> &request_list)

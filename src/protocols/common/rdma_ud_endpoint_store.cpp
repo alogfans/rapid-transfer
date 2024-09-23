@@ -50,6 +50,7 @@ namespace rapid
 
     int RdmaUDEndPointStore::deconstruct()
     {
+        endpoint_map_.clear();
         for (size_t i = 0; i < qp_list_.size(); ++i)
         {
             if (send_wr_depth_list_[i] || recv_wr_depth_list_[i])
@@ -164,14 +165,21 @@ namespace rapid
         if (wr_count == 0)
             return 0;
 
-        ibv_sge sge_list[wr_count];
+        ibv_sge sge_list[kMaxSgeCount * wr_count];
+        int actual_sge_count = 0;
         for (int i = 0; i < wr_count; ++i)
         {
             auto &request = request_list[i];
-            auto &sge = sge_list[i];
-            sge.addr = (uint64_t)request->addr;
-            sge.length = request->length;
-            sge.lkey = request->lkey;
+            for (int j = 0; j < kMaxSgeCount; j++)
+            {
+                if (!request->addr[j])
+                    break;
+                auto &sge = sge_list[i * kMaxSgeCount + j];
+                sge.addr = (uint64_t)request->addr[j];
+                sge.length = request->length[j];
+                sge.lkey = request->lkey[j];
+                actual_sge_count++;
+            }
         }
 
         ibv_send_wr wr_list[wr_count], *bad_wr = nullptr;
@@ -182,8 +190,8 @@ namespace rapid
             auto &wr = wr_list[i];
             wr.wr_id = (uint64_t)request;
             wr.opcode = IBV_WR_SEND;
-            wr.num_sge = 1;
-            wr.sg_list = &sge_list[i];
+            wr.num_sge = actual_sge_count;
+            wr.sg_list = &sge_list[i * kMaxSgeCount];
             wr.send_flags = IBV_SEND_SIGNALED;
             wr.next = (i + 1 == wr_count) ? nullptr : &wr_list[i + 1];
             wr.wr.ud.ah = ah;
@@ -214,14 +222,21 @@ namespace rapid
         if (wr_count == 0)
             return 0;
 
-        ibv_sge sge_list[wr_count];
+        ibv_sge sge_list[kMaxSgeCount * wr_count];
+        int actual_sge_count = 0;
         for (int i = 0; i < wr_count; ++i)
         {
             auto &request = request_list[i];
-            auto &sge = sge_list[i];
-            sge.addr = (uint64_t)request->addr;
-            sge.length = request->length;
-            sge.lkey = request->lkey;
+            for (int j = 0; j < kMaxSgeCount; j++)
+            {
+                if (!request->addr[j])
+                    break;
+                auto &sge = sge_list[i * kMaxSgeCount + j];
+                sge.addr = (uint64_t)request->addr[j];
+                sge.length = request->length[j];
+                sge.lkey = request->lkey[j];
+                actual_sge_count++;
+            }
         }
 
         ibv_recv_wr wr_list[wr_count], *bad_wr = nullptr;
@@ -231,8 +246,8 @@ namespace rapid
             auto &request = request_list[i];
             auto &wr = wr_list[i];
             wr.wr_id = (uint64_t)request;
-            wr.num_sge = 1;
-            wr.sg_list = &sge_list[i];
+            wr.num_sge = actual_sge_count;
+            wr.sg_list = &sge_list[i * kMaxSgeCount];
             wr.next = (i + 1 == wr_count) ? nullptr : &wr_list[i + 1];
             request->qp_depth = &recv_wr_depth_list_[qp_index];
         }

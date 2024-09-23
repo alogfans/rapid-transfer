@@ -37,7 +37,11 @@ namespace rapid
                                           uint8_t rdma_port,
                                           int gid_index)
     {
+        LOG(INFO) << local_hostname;
         int ret = context_.construct(local_hostname, device_name, rdma_port, gid_index);
+        if (ret)
+            return ret;
+        ret = endpoint_store_.construct(context_.cq(SEND_CQ), context_.cq(RECV_CQ));
         if (ret)
             return ret;
         ret = background_worker_.start();
@@ -52,6 +56,7 @@ namespace rapid
         if (!valid_)
             return 0;
         background_worker_.join();
+        endpoint_store_.deconstruct();
         context_.deconstruct();
         valid_ = false;
         return 0;

@@ -12,14 +12,15 @@ namespace rapid
 {
     struct Task;
 
+    const static int kMaxSgeCount = 2;
+
     struct Request
     {
-        void *addr;
-        size_t length;
-        uint32_t lkey;
-        volatile int *qp_depth;
-        volatile Status status;
-        std::string peer_name;
+        void *addr[kMaxSgeCount] = {nullptr};
+        size_t length[kMaxSgeCount] = {0};
+        uint32_t lkey[kMaxSgeCount] = {0};
+        volatile int *qp_depth = nullptr;
+        volatile Status status = UNKNOWN;
     };
 
     struct RdmaEndPoint

@@ -92,7 +92,7 @@ static inline ssize_t readFully(int fd, void *buf, size_t len)
 
 int receiver()
 {
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device);
+    auto engine = rapid::RapidTransfer::Create("rdma_unreliable", FLAGS_device);
     assert(engine);
 
     const size_t dram_buffer_size = 1ull << 30;
@@ -211,7 +211,7 @@ int receiver()
 
 int sender()
 {
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device);
+    auto engine = rapid::RapidTransfer::Create("rdma_unreliable", FLAGS_device);
     assert(engine);
 
     const size_t dram_buffer_size = 1ull << 30;

@@ -52,6 +52,7 @@ namespace rapid
             return 0;
         if (background_running_.exchange(false))
             background_worker_.join();
+        endpoint_store_.deconstruct();
         context_.deconstruct();
         valid_ = false;
         return 0;
@@ -113,11 +114,10 @@ namespace rapid
                 }
 
                 auto request = new Request{
-                    .addr = buffer.addr,
-                    .length = buffer.length,
-                    .lkey = lkey,
-                    .status = PENDING,
-                    .peer_name = peer_name};
+                    .addr = {buffer.addr, 0},
+                    .length = {buffer.length, 0},
+                    .lkey = {lkey, 0},
+                    .status = PENDING};
                 task->request_list.push_back(request);
             }
 
@@ -155,11 +155,10 @@ namespace rapid
             }
 
             auto request = new Request{
-                .addr = buffer.addr,
-                .length = buffer.length,
-                .lkey = lkey,
-                .status = PENDING,
-                .peer_name = peer_name};
+                .addr = {buffer.addr, 0},
+                .length = {buffer.length, 0},
+                .lkey = {lkey, 0},
+                .status = PENDING};
             task->request_list.push_back(request);
         }
 
@@ -188,7 +187,10 @@ namespace rapid
         for (auto &entry : task->request_list)
         {
             if (entry->status == SUCCESS)
-                local_transferred_bytes += entry->length;
+            {
+                for (int i = 0; i < kMaxSgeCount; ++i)
+                    local_transferred_bytes += entry->length[i];
+            }
             if (entry->status == PENDING && summary == SUCCESS)
                 summary = PENDING;
             if (entry->status == FAILED)
@@ -260,7 +262,6 @@ namespace rapid
                            << ", lkey: " << request->lkey
                            << ", local_nic: " << context_.deviceName()
                            << "): " << ibv_wc_status_str(wc[i].status);
-                endpoint_store_.deleteEndpoint(request->peer_name);
                 request->status = FAILED;
             }
             else

@@ -15,12 +15,11 @@ namespace rapid
     public:
         RdmaRCEndPointStore(RdmaContext &context) : context_(context) {}
 
-        ~RdmaRCEndPointStore()
-        {
-            endpoint_map_.clear();
-        }
+        ~RdmaRCEndPointStore() { deconstruct(); }
 
     public:
+        void deconstruct() { endpoint_map_.clear(); }
+
         std::shared_ptr<RdmaRCEndPoint> getOrCreateEndpoint(const std::string &peer_nic_path)
         {
             if (peer_nic_path.empty())
