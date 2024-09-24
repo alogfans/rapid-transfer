@@ -92,6 +92,7 @@ namespace rapid
         {
             PacketHeader hdr;
             void *data;
+            std::string peer_name;
         };
 
         struct Task
@@ -148,7 +149,7 @@ namespace rapid
         std::atomic<bool> workers_running_;
 
         const static size_t kPacketStorageSize = 4096 + 40;
-        const static size_t kMaxPayloadSize = kPacketStorageSize - sizeof(PacketHeader);
+        const static size_t kMaxPayloadSize = 4096 - sizeof(PacketHeader);
 
         const static size_t kWndSend = 128;
         const static size_t kWndRecv = 128;

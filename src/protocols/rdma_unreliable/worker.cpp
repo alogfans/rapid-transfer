@@ -56,6 +56,8 @@ namespace rapid
                 packet.hdr.cmd = CMD_DATA;
                 packet.hdr.wnd = send_wnd_;
                 packet.hdr.sn = next_send_sn_++;
+                packet.hdr.len = current_length;
+                packet.peer_name = peer_name_list[0];
                 send_buffer_.push_back(packet);
                 addr += current_length;
                 length -= current_length;
@@ -154,9 +156,6 @@ namespace rapid
             return -1;
         }
 
-        if (nr_poll)
-            LOG(INFO) << "XXXXXX";
-
         for (int i = 0; i < nr_poll; ++i)
         {
             auto request = (Request *)wc[i].wr_id;
@@ -189,10 +188,6 @@ namespace rapid
     int RdmaUnreliableWorker::sendDataPackets(uint64_t current_ts)
     {
         auto &context = endpoint_store_.context();
-        auto endpoint = endpoint_store_.getOrCreateEndpoint("optane21:12348");
-        if (!endpoint)
-            return -1;
-
         for (auto &record : send_buffer_)
         {
             if ((record.hdr.ts != 0 && current_ts < record.hdr.ts + recv_rto_))
@@ -214,6 +209,9 @@ namespace rapid
                     context.key(record.data).first}};
 
             LOG(INFO) << "Send data: " << record.data << ", " << record.hdr.len;
+            auto endpoint = endpoint_store_.getOrCreateEndpoint(record.peer_name);
+            if (!endpoint)
+                return -1;
             int ret = endpoint->postSendRequest({request});
             if (ret < 0)
                 return -1;
@@ -251,6 +249,7 @@ namespace rapid
             hdr->wnd = send_wnd_;
             hdr->una = next_recv_sn_;
             EncodePacket(hdr, *hdr);
+            // TODO from whom?
             auto endpoint = endpoint_store_.getOrCreateEndpoint("optane20");
             Request *request = new Request{
                 .addr = {hdr, nullptr},
