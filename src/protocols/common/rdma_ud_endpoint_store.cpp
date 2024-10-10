@@ -158,9 +158,8 @@ namespace rapid
         return ret;
     }
 
-    int RdmaUDEndPointStore::postSendRequest(const std::vector<Request *> &request_list, ibv_ah *ah, uint32_t remote_qpn)
+    int RdmaUDEndPointStore::postSendRequest(const std::vector<Request *> &request_list, ibv_ah *ah, uint32_t remote_qpn, int qp_index)
     {
-        int qp_index = lrand48() % qp_list_.size();
         int wr_count = std::min(max_wr_depth_ - send_wr_depth_list_[qp_index], (int)request_list.size());
         if (wr_count == 0)
             return 0;
@@ -215,9 +214,8 @@ namespace rapid
         return wr_count;
     }
 
-    int RdmaUDEndPointStore::postReceiveRequest(const std::vector<Request *> &request_list)
+    int RdmaUDEndPointStore::postReceiveRequest(const std::vector<Request *> &request_list, int qp_index)
     {
-        int qp_index = lrand48() % qp_list_.size();
         int wr_count = std::min(max_wr_depth_ - recv_wr_depth_list_[qp_index], (int)request_list.size());
         if (wr_count == 0)
             return 0;

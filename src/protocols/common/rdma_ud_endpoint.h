@@ -30,7 +30,11 @@ namespace rapid
     private:
         RdmaUDEndPointStore &store_;
         bool connected_;
+
+        std::string peer_gid_;
+        uint16_t peer_lid_;
         std::vector<uint32_t> peer_qp_num_list_;
+
         ibv_ah *ah_;
     };
 

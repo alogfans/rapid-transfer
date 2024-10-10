@@ -33,11 +33,11 @@ namespace rapid
 
         int deleteEndpoint(const std::string &peer_nic_path);
 
+        int postSendRequest(const std::vector<Request *> &request_list, ibv_ah *ah, uint32_t remote_qpn, int qp_index = 0);
+
+        int postReceiveRequest(const std::vector<Request *> &request_list, int qp_index = 0);
+
         std::vector<uint32_t> qpNum() const;
-
-        int postSendRequest(const std::vector<Request *> &request_list, ibv_ah *ah, uint32_t remote_qpn);
-
-        int postReceiveRequest(const std::vector<Request *> &request_list);
 
         RdmaContext &context() const { return context_; }
 

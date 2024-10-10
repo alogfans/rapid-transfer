@@ -1,22 +1,16 @@
 // Copyright 2024 Feng Ren
 
-#ifndef RDMA_UNRELIABLE_WORKER_H
-#define RDMA_UNRELIABLE_WORKER_H
+#ifndef EVENT_LOOP_H_
+#define EVENT_LOOP_H_
 
 #include "concurrency.h"
+#include "impl.h"
 #include "protocol.h"
 #include "protocols/common/rdma_context.h"
 #include "protocols/common/rdma_ud_endpoint.h"
 #include "protocols/common/rdma_ud_endpoint_store.h"
 
-#include <atomic>
 #include <cassert>
-#include <infiniband/verbs.h>
-#include <map>
-#include <mutex>
-#include <queue>
-#include <sys/time.h>
-#include <unordered_set>
 
 namespace rapid
 {
@@ -61,33 +55,23 @@ namespace rapid
         dst.resv2 = le32toh(src->resv2);
     }
 
-    class RdmaUnreliableWorker
+    class EventLoop
     {
     public:
-        RdmaUnreliableWorker(RdmaUDEndPointStore &endpoint_store);
+        EventLoop(RdmaUnreliableProtocol *protocol);
 
-        ~RdmaUnreliableWorker();
+        ~EventLoop();
 
         int start();
 
         int join();
 
-        int submitSendRequest(const std::vector<std::string> &peer_name_list,
-                              const std::vector<Buffer> &buffer_list);
-
-        int submitReceiveRequest(const std::string &peer_name,
-                                 const std::vector<Buffer> &buffer_list);
-
-        Status getStatus(TaskID task_id, size_t *transferred_bytes);
-
-        int freeTask(TaskID task_id);
+        uint64_t completedPackets() { return completed_packets_; }
 
     private:
         void worker();
 
     private:
-        struct Task;
-
         struct Packet
         {
             PacketHeader hdr;
@@ -95,25 +79,11 @@ namespace rapid
             std::string peer_name;
         };
 
-        struct Task
-        {
-            Task(RequestType type, int id)
-                : type(type),
-                  id(id),
-                  status(PENDING),
-                  transferred_bytes(0),
-                  total_bytes(0) {}
-            ~Task() { /* TBD */ }
+        int submitRequests();
 
-            const RequestType type;
-            const TaskID id;
+        int submitSendRequest(const std::string &peer_name, const Buffer &buffer);
 
-            std::atomic<Status> status;
-            std::atomic<uint64_t> transferred_bytes;
-            std::atomic<uint64_t> total_bytes;
-        };
-
-        std::shared_ptr<Task> getTaskById(TaskID task_id);
+        int submitReceiveRequest(const std::string &peer_name, const Buffer &buffer);
 
         int pollCompletedPackets(int cq_index, uint64_t current_ts);
 
@@ -139,14 +109,12 @@ namespace rapid
         }
 
     private:
+        RdmaUnreliableProtocol *protocol_;
         RdmaUDEndPointStore &endpoint_store_;
-        RWSpinlock worker_lock_;
 
         std::atomic<int> next_task_id_;
-        std::unordered_map<TaskID, std::shared_ptr<Task>> task_map_;
-
-        std::vector<std::thread> worker_thread_list_;
-        std::atomic<bool> workers_running_;
+        std::vector<std::thread> worker_list_;
+        std::atomic<bool> running_;
 
         const static size_t kPacketStorageSize = 4096 + 40;
         const static size_t kMaxPayloadSize = 4096 - sizeof(PacketHeader);
@@ -170,9 +138,7 @@ namespace rapid
 
         std::vector<Packet> send_buffer_, recv_buffer_;
         std::queue<Buffer> recv_queue_;
-
         std::atomic<uint64_t> completed_packets_ = 0, total_packets_ = 0;
-
         std::atomic<uint64_t> received_packets_ = 0;
 
     private:
@@ -222,4 +188,4 @@ namespace rapid
     };
 }
 
-#endif // RDMA_UNRELIABLE_WORKER_H
+#endif // EVENT_LOOP_H_

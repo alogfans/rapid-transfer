@@ -1,6 +1,7 @@
 // Copyright 2024 Feng Ren
 
 #include "impl.h"
+#include "event_loop.h"
 
 #include <cassert>
 
@@ -25,11 +26,17 @@ namespace rapid
     }
 
     RdmaUnreliableProtocol::RdmaUnreliableProtocol()
-        : valid_(false), endpoint_store_(context_), background_worker_(endpoint_store_) {}
+        : valid_(false),
+          endpoint_store_(context_),
+          next_task_id_(0)
+    {
+        event_loop_ = new EventLoop(this);
+    }
 
     RdmaUnreliableProtocol::~RdmaUnreliableProtocol()
     {
         deconstruct();
+        delete event_loop_;
     }
 
     int RdmaUnreliableProtocol::construct(const std::string &local_hostname,
@@ -37,14 +44,13 @@ namespace rapid
                                           uint8_t rdma_port,
                                           int gid_index)
     {
-        LOG(INFO) << local_hostname;
         int ret = context_.construct(local_hostname, device_name, rdma_port, gid_index);
         if (ret)
             return ret;
         ret = endpoint_store_.construct(context_.cq(SEND_CQ), context_.cq(RECV_CQ));
         if (ret)
             return ret;
-        ret = background_worker_.start();
+        ret = event_loop_->start();
         if (ret)
             return ret;
         valid_ = true;
@@ -55,7 +61,7 @@ namespace rapid
     {
         if (!valid_)
             return 0;
-        background_worker_.join();
+        event_loop_->join();
         endpoint_store_.deconstruct();
         context_.deconstruct();
         valid_ = false;
@@ -71,6 +77,7 @@ namespace rapid
         local["lid"] = std::to_string(context_.lid());
         local["gid"] = context_.gid();
         local["qp"] = ToString(endpoint->qpNum());
+        local["session"] = std::to_string(session_id_manager_.allocateLocalSessionId(peer_name));
         return 0;
     }
 
@@ -79,37 +86,64 @@ namespace rapid
         auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
         if (!endpoint)
             return -1;
-        if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp"))
+        if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp") || !peer.count("session"))
             return -1;
         auto lid = (uint16_t)std::stoi(peer.at("lid"));
         auto gid = peer.at("gid");
         auto qp_num_list = FromString(peer.at("qp"));
+        auto session_id = std::stoi(peer.at("session"));
         int ret = endpoint->setupConnection(gid, lid, qp_num_list);
         if (ret)
             return ret;
+        session_id_manager_.setRemoteSessionId(peer_name, session_id);
         return 0;
     }
 
     int RdmaUnreliableProtocol::freeTask(TaskID task_id)
     {
-        return background_worker_.freeTask(task_id);
+        task_info_.erase(task_id);
+        return 0;
     }
 
     TaskID RdmaUnreliableProtocol::send(const std::vector<std::string> &peer_name_list,
                                         const std::vector<Buffer> &buffer_list)
     {
-        return background_worker_.submitSendRequest(peer_name_list, buffer_list);
+        TaskInfo info;
+        for (auto &peer_name : peer_name_list)
+        {
+            auto &queue = send_queue_[peer_name];
+            info.fragment_id_map[peer_name] = queue.push(buffer_list);
+        }
+        auto task_id = next_task_id_.fetch_add(1);
+        task_info_[task_id] = info;
+        return task_id;
     }
 
     TaskID RdmaUnreliableProtocol::receive(const std::string &peer_name,
                                            const std::vector<Buffer> &buffer_list)
     {
-        return background_worker_.submitReceiveRequest(peer_name, buffer_list);
+        TaskInfo info;
+        auto &queue = receive_queue_[peer_name];
+        info.fragment_id_map[peer_name] = queue.push(buffer_list);
+        auto task_id = next_task_id_.fetch_add(1);
+        task_info_[task_id] = info;
+        return task_id;
     }
 
     Status RdmaUnreliableProtocol::getStatus(TaskID task_id, size_t *transferred_bytes)
     {
-        return background_worker_.getStatus(task_id, transferred_bytes);
+        if (!task_info_.count(task_id))
+            return UNKNOWN;
+        auto &task = task_info_[task_id];
+        for (auto entry : task.fragment_id_map)
+        {
+            auto peer_name = entry.first;
+            if (nextAckFragmentId(peer_name) < entry.second.second)
+                return PENDING;
+            if (hasLostFragment(peer_name, entry.second))
+                return FAILED;
+        }
+        return SUCCESS;
     }
 
     int RdmaUnreliableProtocol::registerLocalMemory(void *addr, size_t length)
@@ -120,5 +154,16 @@ namespace rapid
     int RdmaUnreliableProtocol::unregisterLocalMemory(void *addr)
     {
         return context_.unregisterMemoryRegion(addr);
+    }
+
+    uint64_t RdmaUnreliableProtocol::nextAckFragmentId(const std::string &peer_name)
+    {
+        return event_loop_->completedPackets();
+    }
+
+    bool RdmaUnreliableProtocol::hasLostFragment(const std::string &peer_name,
+                                                 std::pair<uint64_t, uint64_t> region)
+    {
+        return false;
     }
 }

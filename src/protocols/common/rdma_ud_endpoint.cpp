@@ -81,6 +81,8 @@ namespace rapid
             PLOG(ERROR) << "Failed to create AH";
             return -1;
         }
+        peer_gid_ = peer_gid;
+        peer_lid_ = peer_lid;
         peer_qp_num_list_ = peer_qp_num_list;
         connected_ = true;
         return 0;

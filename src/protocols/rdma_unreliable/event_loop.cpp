@@ -1,136 +1,48 @@
 // Copyright 2024 Feng Ren
 
-#include "worker.h"
+#include "event_loop.h"
+#include "impl.h"
 
 namespace rapid
 {
-    RdmaUnreliableWorker::RdmaUnreliableWorker(RdmaUDEndPointStore &endpoint_store)
-        : endpoint_store_(endpoint_store),
+    EventLoop::EventLoop(RdmaUnreliableProtocol *protocol)
+        : protocol_(protocol),
+          endpoint_store_(protocol->endpoint_store_),
           next_task_id_(0),
-          workers_running_(false)
+          running_(false)
     {
     }
 
-    RdmaUnreliableWorker::~RdmaUnreliableWorker() {}
+    EventLoop::~EventLoop() {}
 
-    int RdmaUnreliableWorker::start()
+    int EventLoop::start()
     {
         setupPacketPool();
-        workers_running_ = true;
-        worker_thread_list_.emplace_back(std::thread(std::bind(&RdmaUnreliableWorker::worker, this)));
+        running_ = true;
+        worker_list_.emplace_back(std::thread(std::bind(&EventLoop::worker, this)));
         return 0;
     }
 
-    int RdmaUnreliableWorker::join()
+    int EventLoop::join()
     {
-        if (!workers_running_.exchange(false))
+        if (!running_.exchange(false))
             return 0;
-        for (auto &entry : worker_thread_list_)
+        for (auto &entry : worker_list_)
             entry.join();
         destroyPacketPool();
         return 0;
     }
 
-    int RdmaUnreliableWorker::submitSendRequest(const std::vector<std::string> &peer_name_list,
-                                                const std::vector<Buffer> &buffer_list)
-    {
-        RWSpinlock::WriteGuard lock_guard(worker_lock_);
-        int task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
-        auto task = std::make_shared<Task>(SEND, task_id);
-        if (!task)
-            return -1;
-        assert(peer_name_list.size() == 1);
-        for (const auto &buffer : buffer_list)
-        {
-            char *addr = (char *)buffer.addr;
-            size_t length = buffer.length;
-            task->total_bytes += length;
-            total_packets_++;
-            while (length > 0)
-            {
-                size_t current_length = std::min(length, kMaxPayloadSize);
-                Packet packet;
-                packet.data = addr;
-                packet.hdr.ts = 0;
-                packet.hdr.cid = 0;
-                packet.hdr.cmd = CMD_DATA;
-                packet.hdr.wnd = send_wnd_;
-                packet.hdr.sn = next_send_sn_++;
-                packet.hdr.len = current_length;
-                packet.peer_name = peer_name_list[0];
-                send_buffer_.push_back(packet);
-                addr += current_length;
-                length -= current_length;
-            }
-        }
-        task_map_[task_id] = task;
-        return task->id;
-    }
-
-    int RdmaUnreliableWorker::submitReceiveRequest(const std::string &peer_name,
-                                                   const std::vector<Buffer> &buffer_list)
-    {
-        RWSpinlock::WriteGuard lock_guard(worker_lock_);
-        int task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
-        auto task = std::make_shared<Task>(RECEIVE, task_id);
-        if (!task)
-            return -1;
-        for (const auto &buffer : buffer_list)
-        {
-            char *addr = (char *)buffer.addr;
-            size_t length = buffer.length;
-            task->total_bytes += length;
-            total_packets_++;
-            while (length > 0)
-            {
-                size_t current_length = std::min(length, kMaxPayloadSize);
-                recv_queue_.push(Buffer{.addr = addr, .length = current_length});
-                addr += current_length;
-                length -= current_length;
-            }
-        }
-        task_map_[task_id] = task;
-        return task->id;
-    }
-
-    Status RdmaUnreliableWorker::getStatus(TaskID task_id, size_t *transferred_bytes)
-    {
-        auto task = getTaskById(task_id);
-        if (!task)
-            return Status::UNKNOWN;
-        if (transferred_bytes)
-            *transferred_bytes = task->transferred_bytes;
-        if (task->status == FAILED)
-            return task->status;
-        if (completed_packets_ < total_packets_)
-            return PENDING;
-        return SUCCESS;
-    }
-
-    int RdmaUnreliableWorker::freeTask(TaskID task_id)
-    {
-        worker_lock_.lock();
-        task_map_.erase(task_id);
-        worker_lock_.unlock();
-        return 0;
-    }
-
-    std::shared_ptr<RdmaUnreliableWorker::Task> RdmaUnreliableWorker::getTaskById(TaskID task_id)
-    {
-        RWSpinlock::ReadGuard guard(worker_lock_);
-        if (!task_map_.count(task_id))
-            return nullptr;
-        return task_map_[task_id];
-    }
-
-    void RdmaUnreliableWorker::worker()
+    void EventLoop::worker()
     {
         for (uint32_t i = 0; i < recv_wnd_; ++i)
             postReceiveWorkRequest();
-        while (workers_running_)
+
+        while (running_)
         {
-            RWSpinlock::WriteGuard lock_guard(worker_lock_);
             uint64_t current_ts = GetCurrentTimeInUsec();
+            if (submitRequests())
+                continue;
             if (pollCompletedPackets(SEND_CQ, current_ts))
                 continue;
             if (pollCompletedPackets(RECV_CQ, current_ts))
@@ -144,7 +56,59 @@ namespace rapid
         }
     }
 
-    int RdmaUnreliableWorker::pollCompletedPackets(int cq_index, uint64_t current_ts)
+    int EventLoop::submitRequests()
+    {
+        for (auto &entry : protocol_->send_queue_)
+        {
+            auto peer_name = entry.first;
+            while (entry.second.hasRemainingFragment())
+            {
+                auto buffer = entry.second.popFragment();
+                assert(buffer.addr);
+                submitSendRequest(peer_name, buffer);
+            }
+        }
+
+        for (auto &entry : protocol_->receive_queue_)
+        {
+            auto peer_name = entry.first;
+            while (entry.second.hasRemainingFragment())
+            {
+                auto buffer = entry.second.popFragment();
+                assert(buffer.addr);
+                submitReceiveRequest(peer_name, buffer);
+            }
+        }
+        return 0;
+    }
+
+    int EventLoop::submitSendRequest(const std::string &peer_name, const Buffer &buffer)
+    {
+        assert(buffer.length <= kMaxPayloadSize);
+        total_packets_++;
+        Packet packet;
+        packet.data = buffer.addr;
+        packet.hdr.ts = 0;
+        packet.hdr.cid = 0;
+        packet.hdr.cmd = CMD_DATA;
+        packet.hdr.wnd = send_wnd_;
+        packet.hdr.sn = next_send_sn_++;
+        packet.hdr.len = buffer.length;
+        packet.peer_name = peer_name;
+        send_buffer_.push_back(packet);
+        return 0;
+    }
+
+    TaskID EventLoop::submitReceiveRequest(const std::string &peer_name, const Buffer &buffer)
+    {
+        char *addr = (char *)buffer.addr;
+        assert(buffer.length <= kMaxPayloadSize);
+        total_packets_++;
+        recv_queue_.push(Buffer{.addr = addr, .length = buffer.length});
+        return 0;
+    }
+
+    int EventLoop::pollCompletedPackets(int cq_index, uint64_t current_ts)
     {
         const static size_t kPollCount = 64;
         auto &context = endpoint_store_.context();
@@ -185,7 +149,7 @@ namespace rapid
         return 0;
     }
 
-    int RdmaUnreliableWorker::sendDataPackets(uint64_t current_ts)
+    int EventLoop::sendDataPackets(uint64_t current_ts)
     {
         auto &context = endpoint_store_.context();
         for (auto &record : send_buffer_)
@@ -219,7 +183,7 @@ namespace rapid
         return 0;
     }
 
-    void RdmaUnreliableWorker::updateSendUna(uint64_t current_ts)
+    void EventLoop::updateSendUna(uint64_t current_ts)
     {
         uint32_t next_send_una = next_send_sn_;
         if (!send_buffer_.empty())
@@ -237,7 +201,7 @@ namespace rapid
         // }
     }
 
-    int RdmaUnreliableWorker::sendAckPackets(uint64_t current_ts)
+    int EventLoop::sendAckPackets(uint64_t current_ts)
     {
         thread_local uint64_t last_received_packets = 0;
         if (last_received_packets < received_packets_)
@@ -250,6 +214,7 @@ namespace rapid
             hdr->una = next_recv_sn_;
             EncodePacket(hdr, *hdr);
             // TODO from whom?
+            LOG(INFO) << "Send ack data";
             auto endpoint = endpoint_store_.getOrCreateEndpoint("optane20");
             Request *request = new Request{
                 .addr = {hdr, nullptr},
@@ -263,7 +228,7 @@ namespace rapid
         return 0;
     }
 
-    void RdmaUnreliableWorker::updateRTO(uint64_t rtt)
+    void EventLoop::updateRTO(uint64_t rtt)
     {
         if (recv_srtt_ == 0)
         {
@@ -284,7 +249,7 @@ namespace rapid
         recv_rto_ = std::min(std::max(kMinRTO, rto), kMaxRTO);
     }
 
-    void RdmaUnreliableWorker::runReceiveCallbacks()
+    void EventLoop::runReceiveCallbacks()
     {
         while (!recv_queue_.empty())
         {
@@ -309,7 +274,7 @@ namespace rapid
         }
     }
 
-    int RdmaUnreliableWorker::ProcessReceivedPacket(uint64_t current_ts, ibv_wc &wc)
+    int EventLoop::ProcessReceivedPacket(uint64_t current_ts, ibv_wc &wc)
     {
         Packet packet;
         Request *request = (Request *)wc.wr_id;
@@ -357,6 +322,7 @@ namespace rapid
                     break;
             }
 
+            LOG(INFO) << "*** Receive ack data";
             updateRTO(current_ts - packet.hdr.ts);
             // timely_.update(current_ts - packet.hdr.ts, current_ts);
             break;
@@ -369,7 +335,7 @@ namespace rapid
         return postReceiveWorkRequest();
     }
 
-    int RdmaUnreliableWorker::postReceiveWorkRequest()
+    int EventLoop::postReceiveWorkRequest()
     {
         auto &context = endpoint_store_.context();
         PacketHeader *hdr = allocatePacket();
