@@ -9,7 +9,8 @@ namespace rapid
         : protocol_(protocol),
           endpoint_store_(protocol->endpoint_store_),
           next_task_id_(0),
-          running_(false)
+          running_(false),
+          packet_pool_(protocol->context_)
     {
     }
 
@@ -17,7 +18,7 @@ namespace rapid
 
     int EventLoop::start()
     {
-        setupPacketPool();
+        packet_pool_.setupPacketPool();
         running_ = true;
         worker_list_.emplace_back(std::thread(std::bind(&EventLoop::worker, this)));
         return 0;
@@ -29,7 +30,7 @@ namespace rapid
             return 0;
         for (auto &entry : worker_list_)
             entry.join();
-        destroyPacketPool();
+        packet_pool_.destroyPacketPool();
         return 0;
     }
 
@@ -162,7 +163,7 @@ namespace rapid
             // send_credit_--;
 
             record.hdr.ts = current_ts;
-            PacketHeader *hdr = allocatePacket();
+            PacketHeader *hdr = packet_pool_.allocatePacket();
             EncodePacket(hdr, record.hdr);
 
             Request *request = new Request{
@@ -206,7 +207,7 @@ namespace rapid
         thread_local uint64_t last_received_packets = 0;
         if (last_received_packets < received_packets_)
         {
-            PacketHeader *hdr = allocatePacket();
+            PacketHeader *hdr = packet_pool_.allocatePacket();
             memset(hdr, 0, sizeof(PacketHeader));
             hdr->cid = 0;
             hdr->cmd = CMD_ACK;
@@ -261,7 +262,7 @@ namespace rapid
                     auto buffer = recv_queue_.front();
                     recv_queue_.pop();
                     memcpy(buffer.addr, iter->data, buffer.length);
-                    // freePacket(iter->data);
+                    // packet_pool_.freePacket(iter->data);
                     recv_buffer_.erase(iter);
                     ++next_recv_sn_;
                     ++completed_packets_;
@@ -338,7 +339,7 @@ namespace rapid
     int EventLoop::postReceiveWorkRequest()
     {
         auto &context = endpoint_store_.context();
-        PacketHeader *hdr = allocatePacket();
+        PacketHeader *hdr = packet_pool_.allocatePacket();
         if (!hdr)
             return -1;
         Request *request = new Request{

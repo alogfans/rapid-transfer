@@ -5,6 +5,8 @@
 
 #include "concurrency.h"
 #include "impl.h"
+#include "packet.h"
+#include "packet_pool.h"
 #include "protocol.h"
 #include "protocols/common/rdma_context.h"
 #include "protocols/common/rdma_ud_endpoint.h"
@@ -14,47 +16,6 @@
 
 namespace rapid
 {
-    const static uint32_t CMD_DATA = 81;
-    const static uint32_t CMD_ACK = 82;
-    struct PacketHeader
-    {
-        __le32 cid;
-        __u8 cmd;
-        __u8 resv1;
-        __le16 wnd;
-        __le64 ts;
-        __le32 sn;
-        __le32 una;
-        __le32 len;
-        __le32 resv2;
-    };
-
-    static inline void EncodePacket(PacketHeader *dst, const PacketHeader &src)
-    {
-        dst->cid = htole32(src.cid);
-        dst->cmd = src.cmd;
-        dst->resv1 = src.resv1;
-        dst->wnd = htole16(src.wnd);
-        dst->ts = htole64(src.ts);
-        dst->sn = htole32(src.sn);
-        dst->una = htole32(src.una);
-        dst->len = htole32(src.len);
-        dst->resv2 = htole32(src.resv2);
-    }
-
-    static inline void DecodePacket(PacketHeader &dst, const PacketHeader *src)
-    {
-        dst.cid = le32toh(src->cid);
-        dst.cmd = src->cmd;
-        dst.resv1 = src->resv1;
-        dst.wnd = le16toh(src->wnd);
-        dst.ts = le64toh(src->ts);
-        dst.sn = le32toh(src->sn);
-        dst.una = le32toh(src->una);
-        dst.len = le32toh(src->len);
-        dst.resv2 = le32toh(src->resv2);
-    }
-
     class EventLoop
     {
     public:
@@ -141,50 +102,7 @@ namespace rapid
         std::atomic<uint64_t> completed_packets_ = 0, total_packets_ = 0;
         std::atomic<uint64_t> received_packets_ = 0;
 
-    private:
-        void *packet_buffer_;
-        void *next_free_packet_buffer_;
-        size_t packet_buffer_count_ = 512;
-
-        void setupPacketPool()
-        {
-            packet_buffer_ = malloc(kPacketStorageSize * packet_buffer_count_);
-            assert(packet_buffer_);
-            auto &context = endpoint_store_.context();
-            int ret = context.registerMemoryRegion(packet_buffer_,
-                                                   kPacketStorageSize * packet_buffer_count_,
-                                                   IBV_ACCESS_LOCAL_WRITE);
-            assert(!ret);
-            next_free_packet_buffer_ = nullptr;
-            for (size_t index = 0; index < packet_buffer_count_; ++index)
-            {
-                void *ptr = (char *)packet_buffer_ + kPacketStorageSize * index;
-                *(uintptr_t *)ptr = (uintptr_t)next_free_packet_buffer_;
-                next_free_packet_buffer_ = ptr;
-            }
-        }
-
-        void destroyPacketPool()
-        {
-            auto &context = endpoint_store_.context();
-            context.unregisterMemoryRegion(packet_buffer_);
-            free(packet_buffer_);
-        }
-
-        PacketHeader *allocatePacket()
-        {
-            void *ptr = next_free_packet_buffer_;
-            assert(ptr);
-            uintptr_t next = *(uintptr_t *)ptr;
-            next_free_packet_buffer_ = (void *)next;
-            return (PacketHeader *)ptr;
-        }
-
-        void freePacket(PacketHeader *header)
-        {
-            *(uintptr_t *)header = (uintptr_t)next_free_packet_buffer_;
-            next_free_packet_buffer_ = header;
-        };
+        PacketPool packet_pool_;
     };
 }
 
