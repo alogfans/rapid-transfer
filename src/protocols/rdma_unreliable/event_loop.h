@@ -38,21 +38,16 @@ namespace rapid
             PacketHeader hdr;
             void *data;
             std::string peer_name;
+            int resend_count;
         };
 
         int submitRequests();
-
-        int submitSendRequest(const std::string &peer_name, const Buffer &buffer);
-
-        int submitReceiveRequest(const std::string &peer_name, const Buffer &buffer);
 
         int pollCompletedPackets(int cq_index, uint64_t current_ts);
 
         int sendDataPackets(uint64_t current_ts);
 
         int sendAckPackets(uint64_t current_ts);
-
-        void updateSendUna(uint64_t current_ts);
 
         void updateRTO(uint64_t rtt);
 
@@ -73,7 +68,6 @@ namespace rapid
         RdmaUnreliableProtocol *protocol_;
         RdmaUDEndPointStore &endpoint_store_;
 
-        std::atomic<int> next_task_id_;
         std::vector<std::thread> worker_list_;
         std::atomic<bool> running_;
 
@@ -87,22 +81,35 @@ namespace rapid
         const static size_t kMaxRTO = 1000 * 10;
         const static uint64_t kMaxPacketBpsRate = 25 * 1000 * 1000;
 
+        const static int kMaxResendCount = 16;
+
         const static uint32_t CMD_SEND = 81;
         const static uint32_t CMD_ACK = 82;
-
-        uint32_t next_send_sn_ = 0, next_recv_sn_ = 0;
         uint32_t send_wnd_ = kWndSend, recv_wnd_ = kWndRecv;
-        uint32_t send_una_ = 0;
+
         uint64_t recv_srtt_ = 0, recv_rttval_ = 0, recv_rto_ = kDefaultRTO;
         int64_t send_credit_ = 1;
         uint64_t send_credit_ts_ = GetCurrentTimeInUsec();
 
         std::vector<Packet> send_buffer_, recv_buffer_;
         std::queue<Buffer> recv_queue_;
-        std::atomic<uint64_t> completed_packets_ = 0, total_packets_ = 0;
+
+        std::atomic<uint64_t> completed_packets_ = 0;
         std::atomic<uint64_t> received_packets_ = 0;
 
         PacketPool packet_pool_;
+
+        struct EndPointState
+        {
+            uint32_t cid = 0;
+            uint32_t next_send_sn = 0;
+            uint32_t next_recv_sn = 0;
+            uint64_t acked_ts = 0;
+            uint32_t acked_next_recv_sn = 0;
+            std::vector<uint32_t> lost_packet_sn;
+        };
+
+        std::unordered_map<std::string, EndPointState> endpoints_state_map_;
     };
 }
 

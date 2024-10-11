@@ -8,7 +8,6 @@ namespace rapid
     EventLoop::EventLoop(RdmaUnreliableProtocol *protocol)
         : protocol_(protocol),
           endpoint_store_(protocol->endpoint_store_),
-          next_task_id_(0),
           running_(false),
           packet_pool_(protocol->context_)
     {
@@ -53,7 +52,6 @@ namespace rapid
                 continue;
             if (sendDataPackets(current_ts))
                 continue;
-            updateSendUna(current_ts);
         }
     }
 
@@ -62,50 +60,31 @@ namespace rapid
         for (auto &entry : protocol_->send_queue_)
         {
             auto peer_name = entry.first;
+            auto &state = endpoints_state_map_[peer_name];
+            auto cid = protocol_->session_id_manager_.getSidBySender(peer_name);
+            if (cid < 0)
+            {
+                LOG(WARNING) << "SID is not assigned, cannot send packets";
+                continue;
+            }
+
             while (entry.second.hasRemainingFragment())
             {
                 auto buffer = entry.second.popFragment();
-                assert(buffer.addr);
-                submitSendRequest(peer_name, buffer);
+                assert(buffer.length <= kMaxPayloadSize);
+                Packet packet;
+                packet.hdr.ts = 0;
+                packet.hdr.cid = cid;
+                packet.hdr.cmd = CMD_DATA;
+                packet.hdr.wnd = send_wnd_;
+                packet.hdr.sn = state.next_send_sn++;
+                packet.hdr.len = buffer.length;
+                packet.data = buffer.addr;
+                packet.peer_name = peer_name;
+                packet.resend_count = 0;
+                send_buffer_.push_back(packet);
             }
         }
-
-        for (auto &entry : protocol_->receive_queue_)
-        {
-            auto peer_name = entry.first;
-            while (entry.second.hasRemainingFragment())
-            {
-                auto buffer = entry.second.popFragment();
-                assert(buffer.addr);
-                submitReceiveRequest(peer_name, buffer);
-            }
-        }
-        return 0;
-    }
-
-    int EventLoop::submitSendRequest(const std::string &peer_name, const Buffer &buffer)
-    {
-        assert(buffer.length <= kMaxPayloadSize);
-        total_packets_++;
-        Packet packet;
-        packet.data = buffer.addr;
-        packet.hdr.ts = 0;
-        packet.hdr.cid = 0;
-        packet.hdr.cmd = CMD_DATA;
-        packet.hdr.wnd = send_wnd_;
-        packet.hdr.sn = next_send_sn_++;
-        packet.hdr.len = buffer.length;
-        packet.peer_name = peer_name;
-        send_buffer_.push_back(packet);
-        return 0;
-    }
-
-    TaskID EventLoop::submitReceiveRequest(const std::string &peer_name, const Buffer &buffer)
-    {
-        char *addr = (char *)buffer.addr;
-        assert(buffer.length <= kMaxPayloadSize);
-        total_packets_++;
-        recv_queue_.push(Buffer{.addr = addr, .length = buffer.length});
         return 0;
     }
 
@@ -140,11 +119,11 @@ namespace rapid
                 ProcessReceivedPacket(current_ts, wc[i]);
                 break;
             case IBV_WC_SEND:
-                delete request;
                 break;
             default:
                 LOG(ERROR) << "Unknown RDMA opcode: " << wc[i].opcode;
             }
+            delete request;
         }
 
         return 0;
@@ -153,15 +132,31 @@ namespace rapid
     int EventLoop::sendDataPackets(uint64_t current_ts)
     {
         auto &context = endpoint_store_.context();
+        for (auto iter = send_buffer_.begin(); iter != send_buffer_.end();)
+        {
+            if (iter->resend_count >= kMaxResendCount)
+            {
+                LOG(WARNING) << "Unable to send data packet, sn=" << iter->hdr.sn;
+                endpoints_state_map_[iter->peer_name].lost_packet_sn.push_back(iter->hdr.sn);
+                send_buffer_.erase(iter);
+                iter = send_buffer_.begin();
+            }
+            else
+            {
+                ++iter;
+            }
+        }
+
         for (auto &record : send_buffer_)
         {
-            if ((record.hdr.ts != 0 && current_ts < record.hdr.ts + recv_rto_))
+            if (record.resend_count != 0 && current_ts < record.hdr.ts + recv_rto_)
                 continue;
 
             // if (send_credit_ <= 0)
             //     continue;
             // send_credit_--;
 
+            record.resend_count++;
             record.hdr.ts = current_ts;
             PacketHeader *hdr = packet_pool_.allocatePacket();
             EncodePacket(hdr, record.hdr);
@@ -184,39 +179,22 @@ namespace rapid
         return 0;
     }
 
-    void EventLoop::updateSendUna(uint64_t current_ts)
-    {
-        uint32_t next_send_una = next_send_sn_;
-        if (!send_buffer_.empty())
-            next_send_una = std::min(next_send_una, send_buffer_.front().hdr.sn);
-        send_una_ = next_send_una;
-
-        // const static uint64_t kCreditUpdateInterval = 100;
-        // if (current_ts - send_credit_ts_ > kCreditUpdateInterval)
-        // {
-        //     const uint64_t kCreditUpdateValue =
-        //         timely_.rate() / (1000000 / kCreditUpdateInterval);
-        //     send_credit_ = kCreditUpdateValue * (current_ts - send_credit_ts_) /
-        //                 kCreditUpdateInterval;
-        //     send_credit_ts_ = current_ts;
-        // }
-    }
-
     int EventLoop::sendAckPackets(uint64_t current_ts)
     {
-        thread_local uint64_t last_received_packets = 0;
-        if (last_received_packets < received_packets_)
+        for (auto &entry : endpoints_state_map_)
         {
+            // if (current_ts - entry.second.acked_ts < recv_rto_)
+            if (entry.second.acked_next_recv_sn >= entry.second.next_recv_sn)
+                continue;
             PacketHeader *hdr = packet_pool_.allocatePacket();
             memset(hdr, 0, sizeof(PacketHeader));
-            hdr->cid = 0;
+            hdr->cid = entry.second.cid;
             hdr->cmd = CMD_ACK;
             hdr->wnd = send_wnd_;
-            hdr->una = next_recv_sn_;
+            hdr->una = entry.second.next_recv_sn;
             EncodePacket(hdr, *hdr);
-            // TODO from whom?
             LOG(INFO) << "Send ack data";
-            auto endpoint = endpoint_store_.getOrCreateEndpoint("optane20");
+            auto endpoint = endpoint_store_.getOrCreateEndpoint(entry.first);
             Request *request = new Request{
                 .addr = {hdr, nullptr},
                 .length = {sizeof(PacketHeader), 0},
@@ -224,7 +202,7 @@ namespace rapid
             int ret = endpoint->postSendRequest({request});
             if (ret < 0)
                 return -1;
-            last_received_packets = received_packets_;
+            entry.second.acked_next_recv_sn = entry.second.next_recv_sn;
         }
         return 0;
     }
@@ -252,26 +230,32 @@ namespace rapid
 
     void EventLoop::runReceiveCallbacks()
     {
-        while (!recv_queue_.empty())
+        for (auto &entry : protocol_->receive_queue_)
         {
-            bool progress = false;
-            for (auto iter = recv_buffer_.begin(); iter != recv_buffer_.end(); iter++)
+            auto peer_name = entry.first;
+            while (entry.second.hasRemainingFragment())
             {
-                if (iter->hdr.sn == next_recv_sn_)
+                bool progress = false;
+                for (auto iter = recv_buffer_.begin(); iter != recv_buffer_.end(); iter++)
                 {
-                    auto buffer = recv_queue_.front();
-                    recv_queue_.pop();
-                    memcpy(buffer.addr, iter->data, buffer.length);
-                    // packet_pool_.freePacket(iter->data);
-                    recv_buffer_.erase(iter);
-                    ++next_recv_sn_;
-                    ++completed_packets_;
-                    progress = true;
-                    break;
+                    auto &cid = endpoints_state_map_[peer_name].cid;
+                    auto &next_recv_sn = endpoints_state_map_[peer_name].next_recv_sn;
+                    cid = protocol_->session_id_manager_.getSidByReceiver(peer_name);
+                    if (iter->hdr.cid == cid && iter->hdr.sn == next_recv_sn)
+                    {
+                        auto buffer = entry.second.popFragment();
+                        memcpy(buffer.addr, iter->data, buffer.length);
+                        // packet_pool_.freePacket(iter->data);
+                        recv_buffer_.erase(iter);
+                        ++next_recv_sn;
+                        ++completed_packets_;
+                        progress = true;
+                        break;
+                    }
                 }
+                if (!progress)
+                    break;
             }
-            if (!progress)
-                break;
         }
     }
 
@@ -285,10 +269,12 @@ namespace rapid
         switch (packet.hdr.cmd)
         {
         case CMD_SEND:
-            if (packet.hdr.sn < next_recv_sn_ || packet.hdr.sn >= next_recv_sn_ + recv_wnd_)
+        {
+            auto peer_name = protocol_->session_id_manager_.getEndPointByReceiver(hdr->cid);
+            auto &next_recv_sn = endpoints_state_map_[peer_name].next_recv_sn;
+            if (packet.hdr.sn < next_recv_sn || packet.hdr.sn >= next_recv_sn + recv_wnd_)
                 break;
-
-            if (packet.hdr.sn >= next_recv_sn_)
+            if (packet.hdr.sn >= next_recv_sn)
             {
                 bool dup = false;
                 for (auto &item : recv_buffer_)
@@ -304,6 +290,7 @@ namespace rapid
             }
             received_packets_++;
             break;
+        }
 
         case CMD_ACK:
             while (true)

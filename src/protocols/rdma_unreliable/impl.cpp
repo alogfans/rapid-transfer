@@ -77,7 +77,7 @@ namespace rapid
         local["lid"] = std::to_string(context_.lid());
         local["gid"] = context_.gid();
         local["qp"] = ToString(endpoint->qpNum());
-        local["session"] = std::to_string(session_id_manager_.allocateLocalSessionId(peer_name));
+        local["session"] = std::to_string(session_id_manager_.allocateSidByReceiver(peer_name));
         return 0;
     }
 
@@ -95,7 +95,7 @@ namespace rapid
         int ret = endpoint->setupConnection(gid, lid, qp_num_list);
         if (ret)
             return ret;
-        session_id_manager_.setRemoteSessionId(peer_name, session_id);
+        session_id_manager_.setSidBySender(peer_name, session_id);
         return 0;
     }
 
