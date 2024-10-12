@@ -64,15 +64,16 @@ namespace rapid
 
         uint64_t nextAckFragmentId(const std::string &peer_name);
 
-        bool hasLostFragment(const std::string &peer_name, std::pair<uint64_t, uint64_t> region);
-
     private:
         bool valid_;
         RdmaContext context_;
         RdmaUDEndPointStore endpoint_store_;
         SessionIdManager session_id_manager_;
+
+        RWSpinlock lock_;
         std::unordered_map<std::string, QueueEntry> send_queue_, receive_queue_;
         std::unordered_map<TaskID, TaskInfo> task_info_;
+
         std::atomic<TaskID> next_task_id_;
         EventLoop *event_loop_;
     };

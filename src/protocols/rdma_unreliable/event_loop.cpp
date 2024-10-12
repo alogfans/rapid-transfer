@@ -60,7 +60,7 @@ namespace rapid
         for (auto &entry : protocol_->send_queue_)
         {
             auto peer_name = entry.first;
-            auto &state = endpoints_state_map_[peer_name];
+            auto &state = sessions_[peer_name];
             auto cid = protocol_->session_id_manager_.getSidBySender(peer_name);
             if (cid < 0)
             {
@@ -68,7 +68,7 @@ namespace rapid
                 continue;
             }
 
-            while (entry.second.hasRemainingFragment())
+            while (send_buffer_.size() < kWndSend && entry.second.hasRemainingFragment())
             {
                 auto buffer = entry.second.popFragment();
                 assert(buffer.length <= kMaxPayloadSize);
@@ -111,6 +111,7 @@ namespace rapid
                            << ", lkey: " << request->lkey
                            << ", local_nic: " << context.deviceName()
                            << "): " << ibv_wc_status_str(wc[i].status);
+                continue;
             }
 
             switch (wc[i].opcode)
@@ -137,7 +138,7 @@ namespace rapid
             if (iter->resend_count >= kMaxResendCount)
             {
                 LOG(WARNING) << "Unable to send data packet, sn=" << iter->hdr.sn;
-                endpoints_state_map_[iter->peer_name].lost_packet_sn.push_back(iter->hdr.sn);
+                sessions_[iter->peer_name].lost_packet_sn.push_back(iter->hdr.sn);
                 send_buffer_.erase(iter);
                 iter = send_buffer_.begin();
             }
@@ -181,10 +182,10 @@ namespace rapid
 
     int EventLoop::sendAckPackets(uint64_t current_ts)
     {
-        for (auto &entry : endpoints_state_map_)
+        for (auto &entry : sessions_)
         {
-            // if (current_ts - entry.second.acked_ts < recv_rto_)
-            if (entry.second.acked_next_recv_sn >= entry.second.next_recv_sn)
+            // TODO 添加一个重发功能
+            if (entry.second.acked_next_recv_sn == entry.second.next_recv_sn && !entry.second.resend_ack)
                 continue;
             PacketHeader *hdr = packet_pool_.allocatePacket();
             memset(hdr, 0, sizeof(PacketHeader));
@@ -203,6 +204,7 @@ namespace rapid
             if (ret < 0)
                 return -1;
             entry.second.acked_next_recv_sn = entry.second.next_recv_sn;
+            entry.second.resend_ack = false;
         }
         return 0;
     }
@@ -238,8 +240,8 @@ namespace rapid
                 bool progress = false;
                 for (auto iter = recv_buffer_.begin(); iter != recv_buffer_.end(); iter++)
                 {
-                    auto &cid = endpoints_state_map_[peer_name].cid;
-                    auto &next_recv_sn = endpoints_state_map_[peer_name].next_recv_sn;
+                    auto &cid = sessions_[peer_name].cid;
+                    auto &next_recv_sn = sessions_[peer_name].next_recv_sn;
                     cid = protocol_->session_id_manager_.getSidByReceiver(peer_name);
                     if (iter->hdr.cid == cid && iter->hdr.sn == next_recv_sn)
                     {
@@ -268,13 +270,13 @@ namespace rapid
         packet.data = hdr + 1;
         switch (packet.hdr.cmd)
         {
-        case CMD_SEND:
+        case CMD_DATA:
         {
             auto peer_name = protocol_->session_id_manager_.getEndPointByReceiver(hdr->cid);
-            auto &next_recv_sn = endpoints_state_map_[peer_name].next_recv_sn;
-            if (packet.hdr.sn < next_recv_sn || packet.hdr.sn >= next_recv_sn + recv_wnd_)
+            auto &state = sessions_[peer_name];
+            if (packet.hdr.sn < state.next_recv_sn || packet.hdr.sn >= state.next_recv_sn + recv_wnd_)
                 break;
-            if (packet.hdr.sn >= next_recv_sn)
+            if (packet.hdr.sn >= state.next_recv_sn)
             {
                 bool dup = false;
                 for (auto &item : recv_buffer_)
@@ -287,6 +289,8 @@ namespace rapid
                 }
                 if (!dup)
                     recv_buffer_.push_back(packet);
+                else if (state.next_recv_sn == state.acked_next_recv_sn)
+                    state.resend_ack = true;
             }
             received_packets_++;
             break;

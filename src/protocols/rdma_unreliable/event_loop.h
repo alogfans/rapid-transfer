@@ -82,9 +82,6 @@ namespace rapid
         const static uint64_t kMaxPacketBpsRate = 25 * 1000 * 1000;
 
         const static int kMaxResendCount = 16;
-
-        const static uint32_t CMD_SEND = 81;
-        const static uint32_t CMD_ACK = 82;
         uint32_t send_wnd_ = kWndSend, recv_wnd_ = kWndRecv;
 
         uint64_t recv_srtt_ = 0, recv_rttval_ = 0, recv_rto_ = kDefaultRTO;
@@ -99,17 +96,20 @@ namespace rapid
 
         PacketPool packet_pool_;
 
-        struct EndPointState
+        struct Session
         {
             uint32_t cid = 0;
             uint32_t next_send_sn = 0;
             uint32_t next_recv_sn = 0;
+
+            // TODO remove
             uint64_t acked_ts = 0;
             uint32_t acked_next_recv_sn = 0;
+            bool resend_ack = false;
             std::vector<uint32_t> lost_packet_sn;
         };
 
-        std::unordered_map<std::string, EndPointState> endpoints_state_map_;
+        std::unordered_map<std::string, Session> sessions_;
     };
 }
 

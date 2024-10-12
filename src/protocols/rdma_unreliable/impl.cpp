@@ -101,6 +101,7 @@ namespace rapid
 
     int RdmaUnreliableProtocol::freeTask(TaskID task_id)
     {
+        RWSpinlock::WriteGuard guard(lock_);
         task_info_.erase(task_id);
         return 0;
     }
@@ -108,6 +109,7 @@ namespace rapid
     TaskID RdmaUnreliableProtocol::send(const std::vector<std::string> &peer_name_list,
                                         const std::vector<Buffer> &buffer_list)
     {
+        RWSpinlock::WriteGuard guard(lock_);
         TaskInfo info;
         for (auto &peer_name : peer_name_list)
         {
@@ -122,6 +124,7 @@ namespace rapid
     TaskID RdmaUnreliableProtocol::receive(const std::string &peer_name,
                                            const std::vector<Buffer> &buffer_list)
     {
+        RWSpinlock::WriteGuard guard(lock_);
         TaskInfo info;
         auto &queue = receive_queue_[peer_name];
         info.fragment_id_map[peer_name] = queue.push(buffer_list);
@@ -132,6 +135,7 @@ namespace rapid
 
     Status RdmaUnreliableProtocol::getStatus(TaskID task_id, size_t *transferred_bytes)
     {
+        RWSpinlock::ReadGuard guard(lock_);
         if (!task_info_.count(task_id))
             return UNKNOWN;
         auto &task = task_info_[task_id];
@@ -140,8 +144,7 @@ namespace rapid
             auto peer_name = entry.first;
             if (nextAckFragmentId(peer_name) < entry.second.second)
                 return PENDING;
-            if (hasLostFragment(peer_name, entry.second))
-                return FAILED;
+            // TODO 如果传输通道失效，则在池内的所有 Send、Recv 请求均直接返回 FAILED
         }
         return SUCCESS;
     }
@@ -159,11 +162,5 @@ namespace rapid
     uint64_t RdmaUnreliableProtocol::nextAckFragmentId(const std::string &peer_name)
     {
         return event_loop_->completedPackets();
-    }
-
-    bool RdmaUnreliableProtocol::hasLostFragment(const std::string &peer_name,
-                                                 std::pair<uint64_t, uint64_t> region)
-    {
-        return false;
     }
 }
