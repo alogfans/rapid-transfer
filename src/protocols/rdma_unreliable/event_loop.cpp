@@ -1,83 +1,95 @@
 // Copyright 2024 Feng Ren
 
 #include "event_loop.h"
-#include "impl.h"
+#include "packet_processor.h"
 
 namespace rapid
 {
-    EventLoop::EventLoop(RdmaUnreliableProtocol *protocol)
-        : protocol_(protocol),
-          endpoint_store_(protocol->endpoint_store_),
-          running_(false),
-          packet_pool_(protocol->context_)
+    EventLoop::EventLoop(PacketProcessor *processor)
+        : processor_(processor),
+          packet_pool_(processor->context())
     {
     }
 
     EventLoop::~EventLoop() {}
 
-    int EventLoop::start()
+    int EventLoop::construct()
     {
+        int ret = 0;
         packet_pool_.setupPacketPool();
-        running_ = true;
-        worker_list_.emplace_back(std::thread(std::bind(&EventLoop::worker, this)));
+        for (uint32_t i = 0; i < recv_wnd_; ++i)
+        {
+            ret = postReceiveWorkRequest();
+            if (ret)
+                return ret;
+        }
         return 0;
     }
 
-    int EventLoop::join()
+    int EventLoop::deconstruct()
     {
-        if (!running_.exchange(false))
-            return 0;
-        for (auto &entry : worker_list_)
-            entry.join();
         packet_pool_.destroyPacketPool();
         return 0;
     }
 
-    void EventLoop::worker()
+    int EventLoop::step()
     {
-        for (uint32_t i = 0; i < recv_wnd_; ++i)
-            postReceiveWorkRequest();
+        uint64_t current_ts = GetCurrentTimeInUsec();
+        int ret = submitRequests();
+        if (ret)
+            return ret;
 
-        while (running_)
-        {
-            uint64_t current_ts = GetCurrentTimeInUsec();
-            if (submitRequests())
-                continue;
-            if (pollCompletedPackets(SEND_CQ, current_ts))
-                continue;
-            if (pollCompletedPackets(RECV_CQ, current_ts))
-                continue;
-            runReceiveCallbacks();
-            if (sendAckPackets(current_ts))
-                continue;
-            if (sendDataPackets(current_ts))
-                continue;
-        }
+        ret = pollCompletedPackets(SEND_CQ, current_ts);
+        if (ret)
+            return ret;
+
+        ret = pollCompletedPackets(RECV_CQ, current_ts);
+        if (ret)
+            return ret;
+
+        runReceiveCallbacks();
+
+        ret = sendAckPackets(current_ts);
+        if (ret)
+            return ret;
+
+        ret = sendDataPackets(current_ts);
+        if (ret)
+            return ret;
+
+        return 0;
     }
 
     int EventLoop::submitRequests()
     {
-        for (auto &entry : protocol_->send_queue_)
+        for (auto &entry : processor_->sessions_)
         {
-            auto peer_name = entry.first;
-            auto &state = sessions_[peer_name];
-            auto cid = protocol_->session_id_manager_.getSidBySender(peer_name);
+            auto &peer_name = entry.first;
+            auto &session = entry.second;
+            if (send_buffer_.size() >= kWndSend || !session.send_queue.hasRemainingFragment())
+                continue;
+
+            auto cid = processor_->sessionIdManager().getSidBySender(peer_name);
             if (cid < 0)
             {
-                LOG(WARNING) << "SID is not assigned, cannot send packets";
-                continue;
+                LOG(ERROR) << "Not assigned SID for peer " << peer_name;
+                return -1;
             }
 
-            while (send_buffer_.size() < kWndSend && entry.second.hasRemainingFragment())
+            while (send_buffer_.size() < kWndSend && session.send_queue.hasRemainingFragment())
             {
-                auto buffer = entry.second.popFragment();
-                assert(buffer.length <= kMaxPayloadSize);
+                auto buffer = session.send_queue.popFragment();
+                if (!buffer.addr || buffer.length <= 0 || buffer.length > kMaxPayloadSize)
+                {
+                    LOG(ERROR) << "Invalid send queue from peer " << peer_name;
+                    return -1;
+                }
                 Packet packet;
                 packet.hdr.ts = 0;
                 packet.hdr.cid = cid;
                 packet.hdr.cmd = CMD_DATA;
                 packet.hdr.wnd = send_wnd_;
-                packet.hdr.sn = state.next_send_sn++;
+                packet.hdr.sn = session.next_send_sn++;
                 packet.hdr.len = buffer.length;
                 packet.data = buffer.addr;
                 packet.peer_name = peer_name;
@@ -91,7 +103,7 @@ namespace rapid
     int EventLoop::pollCompletedPackets(int cq_index, uint64_t current_ts)
     {
         const static size_t kPollCount = 64;
-        auto &context = endpoint_store_.context();
+        auto &context = processor_->context();
         ibv_wc wc[kPollCount];
         int nr_poll = context.poll(kPollCount, wc, cq_index);
         if (nr_poll < 0)
@@ -132,13 +144,13 @@ namespace rapid
 
     int EventLoop::sendDataPackets(uint64_t current_ts)
     {
-        auto &context = endpoint_store_.context();
+        auto &context = processor_->context();
         for (auto iter = send_buffer_.begin(); iter != send_buffer_.end();)
         {
             if (iter->resend_count >= kMaxResendCount)
             {
                 LOG(WARNING) << "Unable to send data packet, sn=" << iter->hdr.sn;
-                sessions_[iter->peer_name].lost_packet_sn.push_back(iter->hdr.sn);
+                processor_->sessions_[iter->peer_name].status = PacketProcessor::SESSION_RESET;
                 send_buffer_.erase(iter);
                 iter = send_buffer_.begin();
             }
@@ -170,7 +182,7 @@ namespace rapid
                     context.key(record.data).first}};
 
             LOG(INFO) << "Send data: " << record.data << ", " << record.hdr.len;
-            auto endpoint = endpoint_store_.getOrCreateEndpoint(record.peer_name);
+            auto endpoint = processor_->endpoint_store_.getOrCreateEndpoint(record.peer_name);
             if (!endpoint)
                 return -1;
             int ret = endpoint->postSendRequest({request});
@@ -182,11 +194,14 @@ namespace rapid
 
     int EventLoop::sendAckPackets(uint64_t current_ts)
     {
-        for (auto &entry : sessions_)
+        // TODO resend on necessary
+        auto &endpoint_store = processor_->endpoint_store_;
+        for (auto &entry : processor_->sessions_)
         {
-            // TODO 添加一个重发功能
-            if (entry.second.acked_next_recv_sn == entry.second.next_recv_sn && !entry.second.resend_ack)
+            if (entry.second.next_ack_recv_sn == entry.second.next_recv_sn)
                 continue;
+            entry.second.next_ack_recv_sn = entry.second.next_recv_sn;
+
             PacketHeader *hdr = packet_pool_.allocatePacket();
             memset(hdr, 0, sizeof(PacketHeader));
             hdr->cid = entry.second.cid;
@@ -195,16 +210,14 @@ namespace rapid
             hdr->una = entry.second.next_recv_sn;
             EncodePacket(hdr, *hdr);
             LOG(INFO) << "Send ack data";
-            auto endpoint = endpoint_store_.getOrCreateEndpoint(entry.first);
+            auto endpoint = endpoint_store.getOrCreateEndpoint(entry.first);
             Request *request = new Request{
                 .addr = {hdr, nullptr},
                 .length = {sizeof(PacketHeader), 0},
-                .lkey = {endpoint_store_.context().key(hdr).first, 0}};
+                .lkey = {endpoint_store.context().key(hdr).first, 0}};
             int ret = endpoint->postSendRequest({request});
             if (ret < 0)
                 return -1;
-            entry.second.acked_next_recv_sn = entry.second.next_recv_sn;
-            entry.second.resend_ack = false;
         }
         return 0;
     }
@@ -232,25 +245,25 @@ namespace rapid
 
     void EventLoop::runReceiveCallbacks()
     {
-        for (auto &entry : protocol_->receive_queue_)
+        for (auto &entry : processor_->sessions_)
         {
-            auto peer_name = entry.first;
-            while (entry.second.hasRemainingFragment())
+            auto &peer_name = entry.first;
+            auto &session = entry.second;
+            while (session.recv_queue.hasRemainingFragment())
             {
                 bool progress = false;
                 for (auto iter = recv_buffer_.begin(); iter != recv_buffer_.end(); iter++)
                 {
-                    auto &cid = sessions_[peer_name].cid;
-                    auto &next_recv_sn = sessions_[peer_name].next_recv_sn;
-                    cid = protocol_->session_id_manager_.getSidByReceiver(peer_name);
+                    auto &cid = session.cid;
+                    auto &next_recv_sn = session.next_recv_sn;
+                    cid = processor_->sessionIdManager().getSidByReceiver(peer_name);
                     if (iter->hdr.cid == cid && iter->hdr.sn == next_recv_sn)
                     {
-                        auto buffer = entry.second.popFragment();
+                        auto buffer = session.recv_queue.popFragment();
                         memcpy(buffer.addr, iter->data, buffer.length);
                         // packet_pool_.freePacket(iter->data);
                         recv_buffer_.erase(iter);
                         ++next_recv_sn;
-                        ++completed_packets_;
                         progress = true;
                         break;
                     }
@@ -272,8 +285,8 @@ namespace rapid
         {
         case CMD_DATA:
         {
-            auto peer_name = protocol_->session_id_manager_.getEndPointByReceiver(hdr->cid);
-            auto &state = sessions_[peer_name];
+            auto peer_name = processor_->sessionIdManager().getEndPointByReceiver(hdr->cid);
+            auto &state = processor_->sessions_[peer_name];
             if (packet.hdr.sn < state.next_recv_sn || packet.hdr.sn >= state.next_recv_sn + recv_wnd_)
                 break;
             if (packet.hdr.sn >= state.next_recv_sn)
@@ -289,14 +302,15 @@ namespace rapid
                 }
                 if (!dup)
                     recv_buffer_.push_back(packet);
-                else if (state.next_recv_sn == state.acked_next_recv_sn)
-                    state.resend_ack = true;
             }
-            received_packets_++;
             break;
         }
 
         case CMD_ACK:
+        {
+            auto peer_name = processor_->sessionIdManager().getEndPointByReceiver(hdr->cid);
+            auto &state = processor_->sessions_[peer_name];
+
             while (true)
             {
                 bool found = false;
@@ -304,7 +318,6 @@ namespace rapid
                 {
                     if (iter->hdr.sn < packet.hdr.una)
                     {
-                        ++completed_packets_;
                         send_buffer_.erase(iter);
                         found = true;
                         break;
@@ -316,9 +329,10 @@ namespace rapid
 
             LOG(INFO) << "*** Receive ack data";
             updateRTO(current_ts - packet.hdr.ts);
+            state.next_ack_send_sn = hdr->una;
             // timely_.update(current_ts - packet.hdr.ts, current_ts);
             break;
-
+        }
         default:
             LOG(INFO) << "Unknown cmd: " << packet.hdr.cmd;
             break;
@@ -329,7 +343,7 @@ namespace rapid
 
     int EventLoop::postReceiveWorkRequest()
     {
-        auto &context = endpoint_store_.context();
+        auto &context = processor_->context();
         PacketHeader *hdr = packet_pool_.allocatePacket();
         if (!hdr)
             return -1;
@@ -337,7 +351,7 @@ namespace rapid
             .addr = {hdr, nullptr},
             .length = {kPacketStorageSize, 0},
             .lkey = {context.key(hdr).first, 0}};
-        int ret = endpoint_store_.postReceiveRequest({request});
+        int ret = processor_->endpoint_store_.postReceiveRequest({request});
         assert(ret == 1);
         return 0;
     }

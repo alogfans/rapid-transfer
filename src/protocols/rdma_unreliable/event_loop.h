@@ -3,34 +3,27 @@
 #ifndef EVENT_LOOP_H_
 #define EVENT_LOOP_H_
 
-#include "concurrency.h"
 #include "impl.h"
 #include "packet.h"
 #include "packet_pool.h"
-#include "protocol.h"
-#include "protocols/common/rdma_context.h"
-#include "protocols/common/rdma_ud_endpoint.h"
-#include "protocols/common/rdma_ud_endpoint_store.h"
 
-#include <cassert>
+#include <sys/time.h>
 
 namespace rapid
 {
+    class PacketProcessor;
     class EventLoop
     {
     public:
-        EventLoop(RdmaUnreliableProtocol *protocol);
+        EventLoop(PacketProcessor *processor);
 
         ~EventLoop();
 
-        int start();
+        int construct();
 
-        int join();
+        int deconstruct();
 
-        uint64_t completedPackets() { return completed_packets_; }
-
-    private:
-        void worker();
+        int step();
 
     private:
         struct Packet
@@ -65,12 +58,6 @@ namespace rapid
         }
 
     private:
-        RdmaUnreliableProtocol *protocol_;
-        RdmaUDEndPointStore &endpoint_store_;
-
-        std::vector<std::thread> worker_list_;
-        std::atomic<bool> running_;
-
         const static size_t kPacketStorageSize = 4096 + 40;
         const static size_t kMaxPayloadSize = 4096 - sizeof(PacketHeader);
 
@@ -88,28 +75,9 @@ namespace rapid
         int64_t send_credit_ = 1;
         uint64_t send_credit_ts_ = GetCurrentTimeInUsec();
 
-        std::vector<Packet> send_buffer_, recv_buffer_;
-        std::queue<Buffer> recv_queue_;
-
-        std::atomic<uint64_t> completed_packets_ = 0;
-        std::atomic<uint64_t> received_packets_ = 0;
-
+        PacketProcessor *processor_;
         PacketPool packet_pool_;
-
-        struct Session
-        {
-            uint32_t cid = 0;
-            uint32_t next_send_sn = 0;
-            uint32_t next_recv_sn = 0;
-
-            // TODO remove
-            uint64_t acked_ts = 0;
-            uint32_t acked_next_recv_sn = 0;
-            bool resend_ack = false;
-            std::vector<uint32_t> lost_packet_sn;
-        };
-
-        std::unordered_map<std::string, Session> sessions_;
+        std::vector<Packet> send_buffer_, recv_buffer_;
     };
 }
 

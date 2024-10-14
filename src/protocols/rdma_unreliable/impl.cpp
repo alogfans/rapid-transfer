@@ -1,42 +1,20 @@
 // Copyright 2024 Feng Ren
 
 #include "impl.h"
-#include "event_loop.h"
-
-#include <cassert>
+#include "packet_processor.h"
 
 namespace rapid
 {
-    static std::string ToString(const std::vector<uint32_t> &list)
-    {
-        std::ostringstream oss;
-        for (const auto &entry : list)
-            oss << " " << entry;
-        return oss.str();
-    }
-
-    static std::vector<uint32_t> FromString(const std::string &str)
-    {
-        std::istringstream iss(str);
-        std::vector<uint32_t> list;
-        uint32_t val;
-        while (iss >> val)
-            list.push_back(val);
-        return list;
-    }
-
     RdmaUnreliableProtocol::RdmaUnreliableProtocol()
-        : valid_(false),
-          endpoint_store_(context_),
+        : running_(false),
+          processors_(nullptr),
           next_task_id_(0)
     {
-        event_loop_ = new EventLoop(this);
     }
 
     RdmaUnreliableProtocol::~RdmaUnreliableProtocol()
     {
         deconstruct();
-        delete event_loop_;
     }
 
     int RdmaUnreliableProtocol::construct(const std::string &local_hostname,
@@ -44,64 +22,53 @@ namespace rapid
                                           uint8_t rdma_port,
                                           int gid_index)
     {
+        if (running_)
+        {
+            LOG(WARNING) << "RdmaUnreliableProtocol has been constructed";
+            return 0;
+        }
+
         int ret = context_.construct(local_hostname, device_name, rdma_port, gid_index);
         if (ret)
             return ret;
-        ret = endpoint_store_.construct(context_.cq(SEND_CQ), context_.cq(RECV_CQ));
+
+        processors_ = new PacketProcessor(*this);
+        ret = processors_->construct();
         if (ret)
             return ret;
-        ret = event_loop_->start();
-        if (ret)
-            return ret;
-        valid_ = true;
+
+        running_ = true;
         return 0;
     }
 
     int RdmaUnreliableProtocol::deconstruct()
     {
-        if (!valid_)
+        if (!running_)
             return 0;
-        event_loop_->join();
-        endpoint_store_.deconstruct();
+
+        processors_->deconstruct();
+        delete processors_;
+        processors_ = nullptr;
+
         context_.deconstruct();
-        valid_ = false;
+
+        running_ = false;
         return 0;
     }
 
     int RdmaUnreliableProtocol::prepareConnection(const std::string &peer_name, Attributes &local)
     {
-        auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
-        if (!endpoint)
-            return -1;
-        local["name"] = context_.localHostname();
-        local["lid"] = std::to_string(context_.lid());
-        local["gid"] = context_.gid();
-        local["qp"] = ToString(endpoint->qpNum());
-        local["session"] = std::to_string(session_id_manager_.allocateSidByReceiver(peer_name));
-        return 0;
+        return processors_->prepareConnection(peer_name, local);
     }
 
     int RdmaUnreliableProtocol::setupConnection(const std::string &peer_name, const Attributes &peer)
     {
-        auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
-        if (!endpoint)
-            return -1;
-        if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp") || !peer.count("session"))
-            return -1;
-        auto lid = (uint16_t)std::stoi(peer.at("lid"));
-        auto gid = peer.at("gid");
-        auto qp_num_list = FromString(peer.at("qp"));
-        auto session_id = std::stoi(peer.at("session"));
-        int ret = endpoint->setupConnection(gid, lid, qp_num_list);
-        if (ret)
-            return ret;
-        session_id_manager_.setSidBySender(peer_name, session_id);
-        return 0;
+        return processors_->setupConnection(peer_name, peer);
     }
 
     int RdmaUnreliableProtocol::freeTask(TaskID task_id)
     {
-        RWSpinlock::WriteGuard guard(lock_);
+        RWSpinlock::WriteGuard guard(task_lock_);
         task_info_.erase(task_id);
         return 0;
     }
@@ -109,14 +76,19 @@ namespace rapid
     TaskID RdmaUnreliableProtocol::send(const std::vector<std::string> &peer_name_list,
                                         const std::vector<Buffer> &buffer_list)
     {
-        RWSpinlock::WriteGuard guard(lock_);
+        RWSpinlock::WriteGuard guard(task_lock_);
+        auto task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
         TaskInfo info;
+        info.type = SEND;
         for (auto &peer_name : peer_name_list)
         {
-            auto &queue = send_queue_[peer_name];
-            info.fragment_id_map[peer_name] = queue.push(buffer_list);
+            int ret = processors_->issuePackets(peer_name, info.type, buffer_list, info.next_sn[peer_name]);
+            if (ret)
+            {
+                LOG(ERROR) << "Failed to issue send packets";
+                return ret;
+            }
         }
-        auto task_id = next_task_id_.fetch_add(1);
         task_info_[task_id] = info;
         return task_id;
     }
@@ -124,27 +96,32 @@ namespace rapid
     TaskID RdmaUnreliableProtocol::receive(const std::string &peer_name,
                                            const std::vector<Buffer> &buffer_list)
     {
-        RWSpinlock::WriteGuard guard(lock_);
-        TaskInfo info;
-        auto &queue = receive_queue_[peer_name];
-        info.fragment_id_map[peer_name] = queue.push(buffer_list);
+        RWSpinlock::WriteGuard guard(task_lock_);
         auto task_id = next_task_id_.fetch_add(1);
+        TaskInfo info;
+        info.type = RECEIVE;
+        int ret = processors_->issuePackets(peer_name, info.type, buffer_list, info.next_sn[peer_name]);
+        if (ret)
+        {
+            LOG(ERROR) << "Failed to issue receive packets";
+            return ret;
+        }
         task_info_[task_id] = info;
         return task_id;
     }
 
     Status RdmaUnreliableProtocol::getStatus(TaskID task_id, size_t *transferred_bytes)
     {
-        RWSpinlock::ReadGuard guard(lock_);
+        RWSpinlock::ReadGuard guard(task_lock_);
         if (!task_info_.count(task_id))
             return UNKNOWN;
         auto &task = task_info_[task_id];
-        for (auto entry : task.fragment_id_map)
+        for (auto entry : task.next_sn)
         {
             auto peer_name = entry.first;
-            if (nextAckFragmentId(peer_name) < entry.second.second)
-                return PENDING;
-            // TODO 如果传输通道失效，则在池内的所有 Send、Recv 请求均直接返回 FAILED
+            auto next_sn = processors_->nextPacketSN(peer_name, task.type);
+            if (next_sn < entry.second)
+                return processors_->connected(peer_name) ? PENDING : FAILED;
         }
         return SUCCESS;
     }
@@ -157,10 +134,5 @@ namespace rapid
     int RdmaUnreliableProtocol::unregisterLocalMemory(void *addr)
     {
         return context_.unregisterMemoryRegion(addr);
-    }
-
-    uint64_t RdmaUnreliableProtocol::nextAckFragmentId(const std::string &peer_name)
-    {
-        return event_loop_->completedPackets();
     }
 }
