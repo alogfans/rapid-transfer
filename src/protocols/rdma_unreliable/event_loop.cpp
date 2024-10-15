@@ -203,12 +203,19 @@ namespace rapid
 
             auto endpoint = processor_->endpoint_store_.getOrCreateEndpoint(record.peer_name);
             if (!endpoint)
+            {
+                packet_pool_.freePacket(hdr);
                 return -1;
+            }
 
             int ret = endpoint->postSendRequest({request});
+            if (ret <= 0)
+                packet_pool_.freePacket(hdr);
+
             if (ret < 0)
                 return -1;
         }
+
         return 0;
     }
 
@@ -220,7 +227,6 @@ namespace rapid
         {
             if (entry.second.next_ack_recv_sn == entry.second.next_recv_sn)
                 continue;
-            entry.second.next_ack_recv_sn = entry.second.next_recv_sn;
 
             PacketHeader *hdr = packet_pool_.allocatePacket();
             if (!hdr)
@@ -246,8 +252,13 @@ namespace rapid
                 .lkey = {endpoint_store.context().key(hdr).first, 0}};
 
             int ret = endpoint->postSendRequest({request});
-            if (ret < 0)
+            if (ret <= 0)
+            {
+                packet_pool_.freePacket(hdr);
                 return -1;
+            }
+
+            entry.second.next_ack_recv_sn = entry.second.next_recv_sn;
         }
         return 0;
     }
@@ -317,10 +328,16 @@ namespace rapid
         {
             auto peer_name = processor_->sessionIdManager().getEndPointByReceiver(hdr->cid);
             if (peer_name.empty())
+            {
+                packet_pool_.freePacket(hdr);
                 return -1;
+            }
             auto &state = processor_->sessions_[peer_name];
             if (packet.hdr.sn < state.next_recv_sn || packet.hdr.sn >= state.next_recv_sn + recv_wnd_)
+            {
+                packet_pool_.freePacket(hdr);
                 break;
+            }
             if (packet.hdr.sn >= state.next_recv_sn)
             {
                 bool dup = false;
@@ -329,6 +346,7 @@ namespace rapid
                     if (item.hdr.sn == packet.hdr.sn)
                     {
                         dup = true;
+                        packet_pool_.freePacket(hdr);
                         break;
                     }
                 }
@@ -362,10 +380,13 @@ namespace rapid
             updateRTO(current_ts - packet.hdr.ts);
             state.next_ack_send_sn = hdr->sn + 1;
             // timely_.update(current_ts - packet.hdr.ts, current_ts);
+            packet_pool_.freePacket(hdr);
             break;
         }
+
         default:
             LOG(INFO) << "Unknown cmd: " << packet.hdr.cmd;
+            packet_pool_.freePacket(hdr);
             break;
         }
 
@@ -389,11 +410,7 @@ namespace rapid
 
         int ret = processor_->endpoint_store_.postReceiveRequest({request});
         if (ret <= 0)
-        {
-            LOG(ERROR) << "Unable to post receive request";
-            return -1;
-        }
-
+            packet_pool_.freePacket(hdr);
         return 0;
     }
 } // namespace rapid
