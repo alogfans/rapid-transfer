@@ -46,7 +46,7 @@ namespace rapid
 
         void runReceiveCallbacks();
 
-        int ProcessReceivedPacket(uint64_t current_ts, ibv_wc &wc);
+        int processReceivedPacket(uint64_t current_ts, ibv_wc &wc);
 
         int postReceiveWorkRequest();
 

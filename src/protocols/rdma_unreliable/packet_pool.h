@@ -3,12 +3,12 @@
 #ifndef PACKET_POOL_H_
 #define PACKET_POOL_H_
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <cassert>
-#include <linux/types.h>
 #include <endian.h>
+#include <linux/types.h>
 
 #include "packet.h"
 #include "protocols/common/rdma_context.h"
@@ -18,10 +18,10 @@ namespace rapid
     class PacketPool
     {
     public:
-        const static size_t kPacketStorageSize = 4096 + 40;
-        const static size_t kPacketBufferCount = 512;
+        const static size_t kPacketStorageSize = 4096 + 64; // 4160
+        const static size_t kPacketBufferCount = 65536;
 
-        PacketPool(RdmaContext &context) : context_(context) {}
+        PacketPool(RdmaContext &context) : context_(context), num_free_(0) {}
 
         void setupPacketPool()
         {
@@ -37,6 +37,7 @@ namespace rapid
                 void *ptr = (char *)packet_buffer_ + kPacketStorageSize * index;
                 *(uintptr_t *)ptr = (uintptr_t)next_free_packet_buffer_;
                 next_free_packet_buffer_ = ptr;
+                num_free_++;
             }
         }
 
@@ -52,19 +53,26 @@ namespace rapid
             assert(ptr);
             uintptr_t next = *(uintptr_t *)ptr;
             next_free_packet_buffer_ = (void *)next;
+            num_free_--;
             return (PacketHeader *)ptr;
         }
 
-        void freePacket(PacketHeader *header)
+        void freePacket(void *ptr)
         {
+            if (!ptr)
+                return;
+            uint64_t index = ((uint64_t)ptr - (uint64_t)packet_buffer_) / kPacketStorageSize;
+            void *header = (char *)packet_buffer_ + index * kPacketStorageSize;
             *(uintptr_t *)header = (uintptr_t)next_free_packet_buffer_;
             next_free_packet_buffer_ = header;
+            num_free_++;
         };
-    
+
     private:
         RdmaContext &context_;
         void *packet_buffer_;
         void *next_free_packet_buffer_;
+        int num_free_;
     };
 }
 

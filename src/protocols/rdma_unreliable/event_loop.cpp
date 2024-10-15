@@ -20,7 +20,7 @@ namespace rapid
         for (uint32_t i = 0; i < recv_wnd_; ++i)
         {
             ret = postReceiveWorkRequest();
-            if (ret)
+            if (ret < 0)
                 return ret;
         }
         return 0;
@@ -62,28 +62,31 @@ namespace rapid
 
     int EventLoop::submitRequests()
     {
-        for (auto &entry : processor_->sessions_)
+        while (true)
         {
-            auto &peer_name = entry.first;
-            auto &session = entry.second;
-            if (send_buffer_.size() >= kWndSend || !session.send_queue.hasRemainingFragment())
-                continue;
-
-            auto cid = processor_->sessionIdManager().getSidBySender(peer_name);
-            if (cid < 0)
+            bool has_entry = false;
+            for (auto &entry : processor_->sessions_)
             {
-                LOG(ERROR) << "Not assigned SID for peer " << peer_name;
-                return -1;
-            }
+                auto &peer_name = entry.first;
+                auto &session = entry.second;
+                if (send_buffer_.size() >= kWndSend || !session.send_queue.hasRemainingFragment())
+                    continue;
 
-            while (send_buffer_.size() < kWndSend && session.send_queue.hasRemainingFragment())
-            {
+                has_entry = true;
+                auto cid = processor_->sessionIdManager().getSidBySender(peer_name);
+                if (cid < 0)
+                {
+                    LOG(ERROR) << "Not assigned SID for peer " << peer_name;
+                    return -1;
+                }
+
                 auto buffer = session.send_queue.popFragment();
                 if (!buffer.addr || buffer.length <= 0 || buffer.length > kMaxPayloadSize)
                 {
                     LOG(ERROR) << "Invalid send queue from peer " << peer_name;
                     return -1;
                 }
+
                 Packet packet;
                 packet.hdr.ts = 0;
                 packet.hdr.cid = cid;
@@ -96,8 +99,9 @@ namespace rapid
                 packet.resend_count = 0;
                 send_buffer_.push_back(packet);
             }
+            if (!has_entry)
+                return 0;
         }
-        return 0;
     }
 
     int EventLoop::pollCompletedPackets(int cq_index, uint64_t current_ts)
@@ -118,24 +122,29 @@ namespace rapid
             __sync_fetch_and_sub(request->qp_depth, 1);
             if (wc[i].status != IBV_WC_SUCCESS)
             {
-                LOG(ERROR) << "Worker: Process failed for slice (addr: " << request->addr
-                           << ", length: " << request->length
-                           << ", lkey: " << request->lkey
+                LOG(ERROR) << "Worker: Process failed for slice (addr: " << request->addr[0] << "+" << request->addr[1]
+                           << ", length: " << request->length[0] << "+" << request->length[1]
+                           << ", lkey: " << request->lkey[0] << "+" << request->lkey[1]
                            << ", local_nic: " << context.deviceName()
                            << "): " << ibv_wc_status_str(wc[i].status);
                 continue;
             }
 
-            switch (wc[i].opcode)
+            if (wc[i].opcode == IBV_WC_SEND)
             {
-            case IBV_WC_RECV:
-                ProcessReceivedPacket(current_ts, wc[i]);
-                break;
-            case IBV_WC_SEND:
-                break;
-            default:
-                LOG(ERROR) << "Unknown RDMA opcode: " << wc[i].opcode;
+                Request *request = (Request *)wc[i].wr_id;
+                packet_pool_.freePacket(request->addr[0]);
             }
+
+            if (wc[i].opcode == IBV_WC_RECV)
+            {
+                int rc = processReceivedPacket(current_ts, wc[i]);
+                if (rc < 0)
+                {
+                    LOG(ERROR) << "Process received packet failed";
+                }
+            }
+
             delete request;
         }
 
@@ -147,7 +156,12 @@ namespace rapid
         auto &context = processor_->context();
         for (auto iter = send_buffer_.begin(); iter != send_buffer_.end();)
         {
-            if (iter->resend_count >= kMaxResendCount)
+            if (processor_->sessions_[iter->peer_name].status == PacketProcessor::SESSION_RESET)
+            {
+                send_buffer_.erase(iter);
+                iter = send_buffer_.begin();
+            }
+            else if (iter->resend_count >= kMaxResendCount)
             {
                 LOG(WARNING) << "Unable to send data packet, sn=" << iter->hdr.sn;
                 processor_->sessions_[iter->peer_name].status = PacketProcessor::SESSION_RESET;
@@ -172,6 +186,12 @@ namespace rapid
             record.resend_count++;
             record.hdr.ts = current_ts;
             PacketHeader *hdr = packet_pool_.allocatePacket();
+            if (!hdr)
+            {
+                LOG(ERROR) << "Unable to allocate memory for packet";
+                return -1;
+            }
+
             EncodePacket(hdr, record.hdr);
 
             Request *request = new Request{
@@ -181,10 +201,10 @@ namespace rapid
                     context.key(hdr).first,
                     context.key(record.data).first}};
 
-            LOG(INFO) << "Send data: " << record.data << ", " << record.hdr.len;
             auto endpoint = processor_->endpoint_store_.getOrCreateEndpoint(record.peer_name);
             if (!endpoint)
                 return -1;
+
             int ret = endpoint->postSendRequest({request});
             if (ret < 0)
                 return -1;
@@ -203,18 +223,28 @@ namespace rapid
             entry.second.next_ack_recv_sn = entry.second.next_recv_sn;
 
             PacketHeader *hdr = packet_pool_.allocatePacket();
+            if (!hdr)
+            {
+                LOG(ERROR) << "Unable to allocate memory for packet";
+                return -1;
+            }
+
             memset(hdr, 0, sizeof(PacketHeader));
             hdr->cid = entry.second.cid;
             hdr->cmd = CMD_ACK;
             hdr->wnd = send_wnd_;
-            hdr->una = entry.second.next_recv_sn;
+            hdr->sn = entry.second.next_recv_sn - 1; // TODO
             EncodePacket(hdr, *hdr);
-            LOG(INFO) << "Send ack data";
+
             auto endpoint = endpoint_store.getOrCreateEndpoint(entry.first);
+            if (!endpoint)
+                return -1;
+
             Request *request = new Request{
                 .addr = {hdr, nullptr},
                 .length = {sizeof(PacketHeader), 0},
                 .lkey = {endpoint_store.context().key(hdr).first, 0}};
+
             int ret = endpoint->postSendRequest({request});
             if (ret < 0)
                 return -1;
@@ -261,7 +291,7 @@ namespace rapid
                     {
                         auto buffer = session.recv_queue.popFragment();
                         memcpy(buffer.addr, iter->data, buffer.length);
-                        // packet_pool_.freePacket(iter->data);
+                        packet_pool_.freePacket(iter->data);
                         recv_buffer_.erase(iter);
                         ++next_recv_sn;
                         progress = true;
@@ -274,7 +304,7 @@ namespace rapid
         }
     }
 
-    int EventLoop::ProcessReceivedPacket(uint64_t current_ts, ibv_wc &wc)
+    int EventLoop::processReceivedPacket(uint64_t current_ts, ibv_wc &wc)
     {
         Packet packet;
         Request *request = (Request *)wc.wr_id;
@@ -286,6 +316,8 @@ namespace rapid
         case CMD_DATA:
         {
             auto peer_name = processor_->sessionIdManager().getEndPointByReceiver(hdr->cid);
+            if (peer_name.empty())
+                return -1;
             auto &state = processor_->sessions_[peer_name];
             if (packet.hdr.sn < state.next_recv_sn || packet.hdr.sn >= state.next_recv_sn + recv_wnd_)
                 break;
@@ -316,7 +348,7 @@ namespace rapid
                 bool found = false;
                 for (auto iter = send_buffer_.begin(); iter != send_buffer_.end(); iter++)
                 {
-                    if (iter->hdr.sn < packet.hdr.una)
+                    if (iter->hdr.sn <= packet.hdr.sn)
                     {
                         send_buffer_.erase(iter);
                         found = true;
@@ -327,9 +359,8 @@ namespace rapid
                     break;
             }
 
-            LOG(INFO) << "*** Receive ack data";
             updateRTO(current_ts - packet.hdr.ts);
-            state.next_ack_send_sn = hdr->una;
+            state.next_ack_send_sn = hdr->sn + 1;
             // timely_.update(current_ts - packet.hdr.ts, current_ts);
             break;
         }
@@ -346,13 +377,23 @@ namespace rapid
         auto &context = processor_->context();
         PacketHeader *hdr = packet_pool_.allocatePacket();
         if (!hdr)
+        {
+            LOG(ERROR) << "Unable to allocate memory for packet";
             return -1;
+        }
+
         Request *request = new Request{
             .addr = {hdr, nullptr},
             .length = {kPacketStorageSize, 0},
             .lkey = {context.key(hdr).first, 0}};
+
         int ret = processor_->endpoint_store_.postReceiveRequest({request});
-        assert(ret == 1);
+        if (ret <= 0)
+        {
+            LOG(ERROR) << "Unable to post receive request";
+            return -1;
+        }
+
         return 0;
     }
 } // namespace rapid
