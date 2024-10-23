@@ -1,0 +1,2 @@
+add_executable(rdma_multicast_test rdma_multicast_test.cpp)
+target_link_libraries(rdma_multicast_test PUBLIC rapid)
