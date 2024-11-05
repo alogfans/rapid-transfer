@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories(include)
 include_directories(src)
+include_directories(/usr/include/jsoncpp)
 
 add_subdirectory(src)
 add_subdirectory(test)
