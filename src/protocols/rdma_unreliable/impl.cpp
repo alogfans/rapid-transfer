@@ -17,8 +17,7 @@ namespace rapid
         deconstruct();
     }
 
-    int RdmaUnreliableProtocol::construct(const std::string &local_hostname,
-                                          const std::string &device_name,
+    int RdmaUnreliableProtocol::construct(const std::string &device_name,
                                           uint8_t rdma_port,
                                           int gid_index)
     {
@@ -28,7 +27,7 @@ namespace rapid
             return 0;
         }
 
-        int ret = context_.construct(local_hostname, device_name, rdma_port, gid_index);
+        int ret = context_.construct(device_name, rdma_port, gid_index);
         if (ret)
             return ret;
 

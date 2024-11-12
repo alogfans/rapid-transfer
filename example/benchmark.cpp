@@ -41,24 +41,10 @@ static void freeMemoryPool(void *addr, size_t size)
     numa_free(addr, size);
 }
 
-static std::string getLocalHostname()
-{
-    const static size_t kHostnameBufLength = 1024;
-    char hostname_buf[kHostnameBufLength];
-    int ret = gethostname(hostname_buf, kHostnameBufLength);
-    if (ret)
-    {
-        PLOG(ERROR) << "Failed to get hostname";
-        return "";
-    }
-    return hostname_buf;
-}
-
 int receiveThread(int thread_id)
 {
     uint16_t port = FLAGS_first_port + thread_id;
-    std::string local_hostname = getLocalHostname() + std::to_string(port);
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname, FLAGS_rdma_port, FLAGS_gid_index);
+    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
     const size_t dram_buffer_size = 64 * 1024 * 1024;
@@ -128,8 +114,7 @@ std::atomic<uint64_t> g_transferred_bytes = 0;
 int sendThread(pthread_barrier_t *barrier, int thread_id)
 {
     uint16_t port = FLAGS_first_port + thread_id;
-    std::string local_hostname = getLocalHostname() + std::to_string(port);
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname, FLAGS_rdma_port, FLAGS_gid_index);
+    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
     uint64_t transferred_bytes = 0;
 

@@ -108,7 +108,6 @@ namespace rapid
         if (!endpoint)
             return -1;
         auto &context = protocol_.context_;
-        local["name"] = context.localHostname();
         local["lid"] = std::to_string(context.lid());
         local["gid"] = context.gid();
         local["qp"] = ToString(endpoint->qpNum());

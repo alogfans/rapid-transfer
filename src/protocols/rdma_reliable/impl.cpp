@@ -32,12 +32,11 @@ namespace rapid
         deconstruct();
     }
 
-    int RdmaReliableProtocol::construct(const std::string &local_hostname,
-                                        const std::string &device_name,
+    int RdmaReliableProtocol::construct(const std::string &device_name,
                                         uint8_t rdma_port,
                                         int gid_index)
     {
-        int ret = context_.construct(local_hostname, device_name, rdma_port, gid_index);
+        int ret = context_.construct(device_name, rdma_port, gid_index);
         if (ret)
             return ret;
         background_running_ = true;
@@ -63,7 +62,6 @@ namespace rapid
         auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
         if (!endpoint)
             return -1;
-        local["name"] = context_.localHostname();
         local["lid"] = std::to_string(context_.lid());
         local["gid"] = context_.gid();
         local["qp"] = ToString(endpoint->qpNum());

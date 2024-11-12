@@ -16,7 +16,7 @@ namespace rapid
     class SessionManager
     {
     public:
-        using OnAcceptCallback = std::function<int(const Attributes &, Attributes &)>;
+        using OnAcceptCallback = std::function<int(const std::string &, const Attributes &, Attributes &)>;
 
         using OnErrorCallback = std::function<void(const std::string &)>;
 

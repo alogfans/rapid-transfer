@@ -21,8 +21,7 @@ namespace rapid
         Protocol(const Protocol &) = delete;
         Protocol &operator=(const Protocol &) = delete;
 
-        virtual int construct(const std::string &local_name,
-                              const std::string &device_name,
+        virtual int construct(const std::string &device_name,
                               uint8_t rdma_port,
                               int gid_index) = 0;
 

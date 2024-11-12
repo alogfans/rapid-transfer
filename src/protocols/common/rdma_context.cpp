@@ -38,12 +38,10 @@ namespace rapid
             deconstruct();
     }
 
-    int RdmaContext::construct(const std::string &local_hostname,
-                               const std::string &device_name,
+    int RdmaContext::construct(const std::string &device_name,
                                uint8_t rdma_port,
                                int gid_index)
     {
-        local_hostname_ = local_hostname;
         device_name_ = device_name;
         num_comp_channel_ = 1;
         const static size_t num_cq_list = 2;

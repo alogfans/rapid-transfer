@@ -183,6 +183,28 @@ namespace rapid
         return 0;
     }
 
+    static std::string getPeerName(int fd)
+    {
+        sockaddr_storage addr_buf;
+        socklen_t addr_buf_len;
+        if (getpeername(fd, (struct sockaddr *)&addr_buf, &addr_buf_len) < 0)
+        {
+            PLOG(ERROR) << "Failed to get peer name";
+            return "";
+        }
+
+        const static size_t HOST_BUF_LEN = 512;
+        const static size_t PORT_BUF_LEN = 64;
+        char host_buf[HOST_BUF_LEN], port_buf[PORT_BUF_LEN];
+
+        if (getnameinfo((struct sockaddr *)&addr_buf, addr_buf_len, host_buf, HOST_BUF_LEN, port_buf, PORT_BUF_LEN, NI_NUMERICHOST | NI_NUMERICSERV))
+        {
+            PLOG(ERROR) << "Failed to convert peer name to string";
+            return "";
+        }
+        return std::string(host_buf) + ":" + std::string(port_buf);
+    }
+
     void SessionManager::listener()
     {
         std::vector<pollfd> fd_list;
@@ -242,6 +264,15 @@ namespace rapid
                 else if (fd_list[i].revents & POLLIN)
                 {
                     int conn_fd = fd_list[i].fd;
+                    auto peer_name = getPeerName(conn_fd);
+                    if (peer_name.empty())
+                    {
+                        PLOG(ERROR) << "Unable to get peer name";
+                        close(conn_fd);
+                        fd_list.erase(fd_list.begin() + i);
+                        continue;
+                    }
+
                     Attributes request, response;
                     int ret = readAttributes(conn_fd, request);
                     if (ret)
@@ -252,7 +283,7 @@ namespace rapid
                         continue;
                     }
 
-                    if (on_accept_(request, response))
+                    if (on_accept_(peer_name, request, response))
                         response["error"] = "reject_connection";
 
                     if (writeAttributes(conn_fd, response))
@@ -263,7 +294,7 @@ namespace rapid
                         continue;
                     }
 
-                    peer_name_map[conn_fd] = request["name"];
+                    peer_name_map[conn_fd] = peer_name;
                 }
             }
         }

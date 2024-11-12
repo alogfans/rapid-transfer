@@ -47,16 +47,14 @@ namespace rapid
         // Parameters:
         // - protocol: Transfer protocol name, can be either `rdma-reliable` or `rdma-unreliable`
         // - device_name: RDMA NIC name for transfer, e.g. `mlx5_0`
-        // - local_name: Local server identification, `gethostname(2)` by default
         // - rdma_port: RDMA NIC port for communication
         // - gid_index: RDMA Local GID index for communication
         //
         // Return Value: RapidTransfer pointer if success, nullptr if failed
         static std::shared_ptr<RapidTransfer> Create(const std::string &protocol,
                                                      const std::string &device_name,
-                                                     const std::string &local_name = "",
                                                      uint8_t rdma_port = 1,
-                                                     int gid_index = 3);
+                                                     int gid_index = 0);
 
         RapidTransfer(const std::string &device_name);
 

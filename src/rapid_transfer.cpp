@@ -11,7 +11,6 @@ namespace rapid
 {
     std::shared_ptr<RapidTransfer> RapidTransfer::Create(const std::string &protocol,
                                                          const std::string &device_name,
-                                                         const std::string &local_name,
                                                          uint8_t rdma_port,
                                                          int gid_index)
     {
@@ -27,21 +26,7 @@ namespace rapid
             return nullptr;
         }
 
-        std::string actual_local_name = local_name;
-        if (actual_local_name.empty())
-        {
-            const static size_t kHostnameBufLength = 1024;
-            char hostname_buf[kHostnameBufLength];
-            int ret = gethostname(hostname_buf, kHostnameBufLength);
-            if (ret)
-            {
-                PLOG(ERROR) << "Failed to get hostname";
-                return nullptr;
-            }
-            actual_local_name = hostname_buf;
-        }
-
-        int ret = engine->protocol_->construct(actual_local_name, device_name, rdma_port, gid_index);
+        int ret = engine->protocol_->construct(device_name, rdma_port, gid_index);
         if (ret)
         {
             LOG(ERROR) << "Failed to construct protocol";
@@ -106,15 +91,8 @@ namespace rapid
 
     int RapidTransfer::startListener(const std::string &listen_address, const OnConnectionStateChange &callback)
     {
-        auto on_accept = [=](const Attributes &request, Attributes &response) -> int
+        auto on_accept = [=](const std::string &peer_name, const Attributes &request, Attributes &response) -> int
         {
-            if (!request.count("name"))
-            {
-                LOG(ERROR) << "Malformed request: missing name";
-                return -1;
-            }
-
-            auto peer_name = request.at("name");
             int ret = protocol_->prepareConnection(peer_name, response);
             if (ret)
             {
@@ -131,6 +109,7 @@ namespace rapid
 
             if (callback)
                 callback(peer_name, true);
+
             return 0;
         };
 

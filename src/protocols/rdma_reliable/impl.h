@@ -22,8 +22,7 @@ namespace rapid
         RdmaReliableProtocol(const RdmaReliableProtocol &) = delete;
         RdmaReliableProtocol &operator=(const RdmaReliableProtocol &) = delete;
 
-        virtual int construct(const std::string &local_hostname,
-                              const std::string &device_name,
+        virtual int construct(const std::string &device_name,
                               uint8_t rdma_port,
                               int gid_index);
 
