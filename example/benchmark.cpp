@@ -26,6 +26,8 @@ DEFINE_string(target_hostname, "optane21", "Target hostname (and port, if needed
 DEFINE_uint32(first_port, 12345, "First TCP port for connecting");
 DEFINE_uint32(threads, 8, "Number of concurrent threads");
 DEFINE_uint32(block_size, 65536, "Access granularity");
+DEFINE_uint32(rdma_port, 1, "RDMA port");
+DEFINE_uint32(gid_index, 0, "GID Index");
 
 using namespace rapid;
 
@@ -56,7 +58,7 @@ int receiveThread(int thread_id)
 {
     uint16_t port = FLAGS_first_port + thread_id;
     std::string local_hostname = getLocalHostname() + std::to_string(port);
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname);
+    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
     const size_t dram_buffer_size = 64 * 1024 * 1024;
@@ -127,7 +129,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id)
 {
     uint16_t port = FLAGS_first_port + thread_id;
     std::string local_hostname = getLocalHostname() + std::to_string(port);
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname);
+    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
     uint64_t transferred_bytes = 0;
 
