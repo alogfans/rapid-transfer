@@ -8,53 +8,52 @@
 #include "rdma_context.h"
 #include "rdma_endpoint.h"
 
-namespace rapid
-{
-    class RdmaUDEndPoint;
+namespace rapid {
+class RdmaUDEndPoint;
 
-    class RdmaUDEndPointStore
-    {
-    public:
-        RdmaUDEndPointStore(RdmaContext &context) : context_(context) {}
+class RdmaUDEndPointStore {
+   public:
+    RdmaUDEndPointStore(RdmaContext &context) : context_(context) {}
 
-        ~RdmaUDEndPointStore() { deconstruct(); }
+    ~RdmaUDEndPointStore() { deconstruct(); }
 
-    public:
-        int construct(ibv_cq *send_cq,
-                      ibv_cq *recv_cq,
-                      size_t num_qp_list = 1,
-                      size_t max_sge = 1,
-                      size_t max_wr = 256,
-                      size_t max_inline = 0);
+   public:
+    int construct(ibv_cq *send_cq, ibv_cq *recv_cq, size_t num_qp_list = 1,
+                  size_t max_sge = 4, size_t max_wr = 256,
+                  size_t max_inline = 64);
 
-        int deconstruct();
+    int deconstruct();
 
-        std::shared_ptr<RdmaUDEndPoint> getOrCreateEndpoint(const std::string &peer_nic_path);
+    std::shared_ptr<RdmaUDEndPoint> getOrCreateEndpoint(
+        const std::string &peer_nic_path);
 
-        int deleteEndpoint(const std::string &peer_nic_path);
+    int deleteEndpoint(const std::string &peer_nic_path);
 
-        int postSendRequest(const std::vector<Request *> &request_list, ibv_ah *ah, uint32_t remote_qpn, int qp_index = 0);
+    int postSendRequest(const std::vector<Request *> &request_list, ibv_ah *ah,
+                        uint32_t remote_qpn, int qp_index = 0);
 
-        int postReceiveRequest(const std::vector<Request *> &request_list, int qp_index = 0);
+    int postReceiveRequest(const std::vector<Request *> &request_list,
+                           int qp_index = 0);
 
-        std::vector<uint32_t> qpNum() const;
+    std::vector<uint32_t> qpNum() const;
 
-        RdmaContext &context() const { return context_; }
+    RdmaContext &context() const { return context_; }
 
-    private:
-        int setupQueuePair(ibv_qp *qp);
+   private:
+    int setupQueuePair(ibv_qp *qp);
 
-    private:
-        RWSpinlock endpoint_map_lock_;
-        std::unordered_map<std::string, std::shared_ptr<RdmaUDEndPoint>> endpoint_map_;
+   private:
+    RWSpinlock endpoint_map_lock_;
+    std::unordered_map<std::string, std::shared_ptr<RdmaUDEndPoint>>
+        endpoint_map_;
 
-        std::vector<ibv_qp *> qp_list_;
-        volatile int *send_wr_depth_list_, *recv_wr_depth_list_;
-        int max_wr_depth_;
+    std::vector<ibv_qp *> qp_list_;
+    volatile int *send_wr_depth_list_, *recv_wr_depth_list_;
+    int max_wr_depth_;
 
-        ibv_cq *send_cq_, *recv_cq_;
-        RdmaContext &context_;
-    };
-}
+    ibv_cq *send_cq_, *recv_cq_;
+    RdmaContext &context_;
+};
+}  // namespace rapid
 
-#endif // RDMA_UD_ENDPOINT_STORE_H
+#endif  // RDMA_UD_ENDPOINT_STORE_H

@@ -26,6 +26,8 @@ DEFINE_string(target_hostname, "optane21", "Target hostname (and port, if needed
 DEFINE_uint32(first_port, 12345, "First TCP port for connecting");
 DEFINE_uint32(threads, 8, "Number of concurrent threads");
 DEFINE_uint32(block_size, 65536, "Access granularity");
+DEFINE_uint32(rdma_port, 1, "RDMA port");
+DEFINE_uint32(gid_index, 0, "GID Index");
 
 using namespace rapid;
 
@@ -39,24 +41,10 @@ static void freeMemoryPool(void *addr, size_t size)
     numa_free(addr, size);
 }
 
-static std::string getLocalHostname()
-{
-    const static size_t kHostnameBufLength = 1024;
-    char hostname_buf[kHostnameBufLength];
-    int ret = gethostname(hostname_buf, kHostnameBufLength);
-    if (ret)
-    {
-        PLOG(ERROR) << "Failed to get hostname";
-        return "";
-    }
-    return hostname_buf;
-}
-
 int receiveThread(int thread_id)
 {
     uint16_t port = FLAGS_first_port + thread_id;
-    std::string local_hostname = getLocalHostname() + std::to_string(port);
-    auto engine = rapid::RapidTransfer::Create("rdma_unreliable", FLAGS_device, local_hostname, 1, 1);
+    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
     const size_t dram_buffer_size = 64 * 1024 * 1024;
@@ -125,9 +113,7 @@ std::atomic<uint64_t> g_transferred_bytes = 0;
 
 int sendThread(pthread_barrier_t *barrier, int thread_id)
 {
-    uint16_t port = FLAGS_first_port + thread_id;
-    std::string local_hostname = getLocalHostname() + std::to_string(port);
-    auto engine = rapid::RapidTransfer::Create("rdma_unreliable", FLAGS_device, local_hostname, 1, 1);
+    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
     uint64_t transferred_bytes = 0;
 
@@ -153,7 +139,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id)
     {
         uint16_t port = FLAGS_first_port + lrand48() % FLAGS_threads;
         auto target = FLAGS_target_hostname + ":" + std::to_string(port);
-        TaskID task_id = engine->send({target}, {{addr, chunk_size}});
+        TaskID task_id = engine->send(target, {{addr, chunk_size}});
         if (task_id < 0)
         {
             LOG(ERROR) << "Cannot post send request";

@@ -4,152 +4,118 @@
 #ifndef RDMA_CONTEXT_H
 #define RDMA_CONTEXT_H
 
-#include "concurrency.h"
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+#include <infiniband/verbs.h>
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <gflags/gflags.h>
-#include <glog/logging.h>
-#include <infiniband/verbs.h>
 #include <list>
 #include <memory>
 #include <string>
 #include <thread>
 #include <unordered_map>
 
-namespace rapid
-{
-    class RdmaRCEndPoint;
-    class RdmaRCEndPointStore;
+#include "concurrency.h"
 
-    const static std::string NIC_PATH_DELIM = "@";
+namespace rapid {
+class RdmaRCEndPoint;
+class RdmaRCEndPointStore;
 
-    static inline const std::string getServerNameFromNicPath(const std::string &nic_path)
-    {
-        size_t pos = nic_path.find(NIC_PATH_DELIM);
-        if (pos == nic_path.npos)
-            return "";
-        return nic_path.substr(0, pos);
-    }
+enum { SEND_CQ, RECV_CQ };
 
-    static inline const std::string getNicNameFromNicPath(const std::string &nic_path)
-    {
-        size_t pos = nic_path.find(NIC_PATH_DELIM);
-        if (pos == nic_path.npos)
-            return "";
-        return nic_path.substr(pos + 1);
-    }
+class RdmaContext {
+   public:
+    RdmaContext();
 
-    static inline const std::string MakeNicPath(const std::string &server_name, const std::string &nic_name)
-    {
-        return server_name + NIC_PATH_DELIM + nic_name;
-    }
+    ~RdmaContext();
 
-    enum
-    {
-        SEND_CQ,
-        RECV_CQ
-    };
+    int construct(const std::string &device_name, uint8_t rdma_port,
+                  int gid_index);
 
-    class RdmaContext
-    {
-    public:
-        RdmaContext();
+    int deconstruct();
 
-        ~RdmaContext();
+   public:
+    int registerMemoryRegion(void *addr, size_t length, int access);
 
-        int construct(const std::string &local_hostname,
-                      const std::string &device_name,
-                      uint8_t rdma_port,
-                      int gid_index);
+    int unregisterMemoryRegion(void *addr);
 
-        int deconstruct();
+    std::pair<uint32_t, uint32_t> key(void *addr);
 
-    public:
-        int registerMemoryRegion(void *addr, size_t length, int access);
+    bool active() const { return active_; }
 
-        int unregisterMemoryRegion(void *addr);
+    void set_active(bool flag) { active_ = flag; }
 
-        std::pair<uint32_t, uint32_t> key(void *addr);
+   public:
+    std::string deviceName() const { return device_name_; }
 
-        bool active() const { return active_; }
+   public:
+    uint16_t lid() const { return lid_; }
 
-        void set_active(bool flag) { active_ = flag; }
+    std::string gid() const;
 
-    public:
-        std::string nicPath() const { return MakeNicPath(local_hostname_, device_name_); }
+    int gidIndex() const { return gid_index_; }
 
-        std::string deviceName() const { return device_name_; }
+    ibv_context *context() const { return context_; }
 
-    public:
-        uint16_t lid() const { return lid_; }
+    ibv_pd *pd() const { return pd_; }
 
-        std::string gid() const;
+    uint8_t portNum() const { return port_; }
 
-        int gidIndex() const { return gid_index_; }
+    int activeSpeed() const { return active_speed_; }
 
-        ibv_context *context() const { return context_; }
+    ibv_mtu activeMTU() const { return active_mtu_; }
 
-        ibv_pd *pd() const { return pd_; }
+    ibv_comp_channel *compChannel();
 
-        uint8_t portNum() const { return port_; }
+    int compVector();
 
-        int activeSpeed() const { return active_speed_; }
+    int eventFd() const { return event_fd_; }
 
-        ibv_mtu activeMTU() const { return active_mtu_; }
+    int poll(int num_entries, ibv_wc *wc, int cq_index = 0);
 
-        ibv_comp_channel *compChannel();
+    int socketId();
 
-        int compVector();
+    ibv_cq *cq(int type) { return cq_list_[type]; }
 
-        int eventFd() const { return event_fd_; }
+   private:
+    int openRdmaDevice(const std::string &device_name, uint8_t port,
+                       int gid_index);
 
-        int poll(int num_entries, ibv_wc *wc, int cq_index = 0);
+    int joinNonblockingPollList(int event_fd, int data_fd);
 
-        int socketId();
+   private:
+    std::string device_name_;
 
-        ibv_cq *cq(int type) { return cq_list_[type]; }
+    ibv_context *context_ = nullptr;
+    ibv_pd *pd_ = nullptr;
+    int event_fd_ = -1;
 
-        std::string localHostname() const { return local_hostname_; }
+    size_t num_comp_channel_ = 0;
+    ibv_comp_channel **comp_channel_ = nullptr;
 
-    private:
-        int openRdmaDevice(const std::string &device_name, uint8_t port, int gid_index);
+    uint8_t port_ = 0;
+    uint16_t lid_ = 0;
+    int gid_index_ = -1;
+    int active_speed_ = -1;
+    ibv_mtu active_mtu_;
+    ibv_gid gid_;
 
-        int joinNonblockingPollList(int event_fd, int data_fd);
+    RWSpinlock memory_regions_lock_;
+    std::vector<ibv_mr *> memory_region_list_;
+    std::vector<ibv_cq *> cq_list_;
 
-    private:
-        std::string local_hostname_;
-        std::string device_name_;
+    std::vector<std::thread> background_thread_;
+    std::atomic<bool> threads_running_;
 
-        ibv_context *context_ = nullptr;
-        ibv_pd *pd_ = nullptr;
-        int event_fd_ = -1;
+    std::atomic<int> next_comp_channel_index_;
+    std::atomic<int> next_comp_vector_index_;
+    std::atomic<int> next_cq_list_index_;
 
-        size_t num_comp_channel_ = 0;
-        ibv_comp_channel **comp_channel_ = nullptr;
+    volatile bool active_;
+};
 
-        uint8_t port_ = 0;
-        uint16_t lid_ = 0;
-        int gid_index_ = -1;
-        int active_speed_ = -1;
-        ibv_mtu active_mtu_;
-        ibv_gid gid_;
+}  // namespace rapid
 
-        RWSpinlock memory_regions_lock_;
-        std::vector<ibv_mr *> memory_region_list_;
-        std::vector<ibv_cq *> cq_list_;
-
-        std::vector<std::thread> background_thread_;
-        std::atomic<bool> threads_running_;
-
-        std::atomic<int> next_comp_channel_index_;
-        std::atomic<int> next_comp_vector_index_;
-        std::atomic<int> next_cq_list_index_;
-
-        volatile bool active_;
-    };
-
-}
-
-#endif // RDMA_CONTEXT_H
+#endif  // RDMA_CONTEXT_H

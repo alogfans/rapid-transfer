@@ -25,6 +25,8 @@ DEFINE_string(path, "", "Path of file to transfer");
 DEFINE_string(device, "mlx5_2", "RDMA device name to use");
 DEFINE_string(target, "optane21:12348", "Target hostname (and port, if needed)");
 DEFINE_string(listen, ":12348", "TCP listen address");
+DEFINE_uint32(rdma_port, 1, "RDMA port");
+DEFINE_uint32(gid_index, 0, "GID Index");
 
 using namespace rapid;
 
@@ -92,7 +94,7 @@ static inline ssize_t readFully(int fd, void *buf, size_t len)
 
 int receiver()
 {
-    auto engine = rapid::RapidTransfer::Create("rdma_unreliable", FLAGS_device);
+    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
     const size_t dram_buffer_size = 1ull << 30;
@@ -211,7 +213,7 @@ int receiver()
 
 int sender()
 {
-    auto engine = rapid::RapidTransfer::Create("rdma_unreliable", FLAGS_device);
+    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
     const size_t dram_buffer_size = 1ull << 30;
@@ -278,7 +280,7 @@ int sender()
     };
 
     *(uint64_t *)addr = file_size;
-    TaskID task_id = engine->send({FLAGS_target}, {{addr, sizeof(uint64_t)}});
+    TaskID task_id = engine->send(FLAGS_target, {{addr, sizeof(uint64_t)}});
     if (wait_for_completion(task_id))
     {
         cleanup();
