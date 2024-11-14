@@ -92,44 +92,41 @@ namespace rapid
         return 0;
     }
 
-    TaskID RdmaReliableProtocol::send(const std::vector<std::string> &peer_name_list,
+    TaskID RdmaReliableProtocol::send(const std::string &peer_name,
                                       const std::vector<Buffer> &buffer_list)
     {
         auto task = allocateTask(SEND);
         if (!task)
             return -1;
 
-        for (auto &peer_name : peer_name_list)
+        for (auto &buffer : buffer_list)
         {
-            for (auto &buffer : buffer_list)
+            auto lkey = context_.key(buffer.addr).first;
+            if (lkey == 0)
             {
-                auto lkey = context_.key(buffer.addr).first;
-                if (lkey == 0)
-                {
-                    LOG(ERROR) << "Buffer " << buffer.addr << " not registered";
-                    freeTask(task->id);
-                    return -1;
-                }
-
-                auto request = new Request{
-                    .addr = {buffer.addr, 0},
-                    .length = {buffer.length, 0},
-                    .lkey = {lkey, 0},
-                    .status = PENDING};
-                task->request_list.push_back(request);
-            }
-
-            auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
-            if (!endpoint || !endpoint->connected())
-                return -1;
-
-            // TODO it should be executed in background!!!
-            int ret = endpoint->postSendRequest(task->request_list);
-            if (ret != (int)buffer_list.size())
-            {
-                LOG(INFO) << "Unable to post request";
+                LOG(ERROR) << "Buffer " << buffer.addr << " not registered";
+                freeTask(task->id);
                 return -1;
             }
+
+            auto request = new Request{
+                .addr = {buffer.addr, 0},
+                .length = {buffer.length, 0},
+                .lkey = {lkey, 0},
+                .status = PENDING};
+            task->request_list.push_back(request);
+        }
+
+        auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
+        if (!endpoint || !endpoint->connected())
+            return -1;
+
+        // TODO it should be executed in background!!!
+        int ret = endpoint->postSendRequest(task->request_list);
+        if (ret != (int)buffer_list.size())
+        {
+            LOG(INFO) << "Unable to post request";
+            return -1;
         }
 
         return task->id;

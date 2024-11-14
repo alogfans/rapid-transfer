@@ -72,21 +72,18 @@ namespace rapid
         return 0;
     }
 
-    TaskID RdmaUnreliableProtocol::send(const std::vector<std::string> &peer_name_list,
+    TaskID RdmaUnreliableProtocol::send(const std::string &peer_name,
                                         const std::vector<Buffer> &buffer_list)
     {
         RWSpinlock::WriteGuard guard(task_lock_);
         auto task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
         TaskInfo info;
         info.type = SEND;
-        for (auto &peer_name : peer_name_list)
+        int ret = processors_->issuePackets(peer_name, info.type, buffer_list, info.next_sn[peer_name]);
+        if (ret)
         {
-            int ret = processors_->issuePackets(peer_name, info.type, buffer_list, info.next_sn[peer_name]);
-            if (ret)
-            {
-                LOG(ERROR) << "Failed to issue send packets";
-                return ret;
-            }
+            LOG(ERROR) << "Failed to issue send packets";
+            return ret;
         }
         task_info_[task_id] = info;
         return task_id;

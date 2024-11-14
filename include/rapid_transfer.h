@@ -61,10 +61,10 @@ namespace rapid
         virtual ~RapidTransfer();
 
         // Start an asynchronous file transfer task
-        // - peer_name_list: Hostnames (or IP ports) of target servers to transfer file
+        // - peer_name: Hostname of target servers to transfer file
         // - buffer_list: List of memory buffers, representing the content of transferred data
         // Return Value: Task ID if success, negative values if failed
-        TaskID send(const std::vector<std::string> &peer_name_list, const std::vector<Buffer> &buffer_list);
+        TaskID send(const std::string &peer_name, const std::vector<Buffer> &buffer_list);
 
         TaskID receive(const std::string &peer_name, const std::vector<Buffer> &buffer_list);
 

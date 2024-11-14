@@ -46,19 +46,15 @@ namespace rapid
         delete session_manager_;
     }
 
-    TaskID RapidTransfer::send(const std::vector<std::string> &peer_name_list,
+    TaskID RapidTransfer::send(const std::string &peer_name,
                                const std::vector<Buffer> &buffer_list)
     {
-        for (auto &peer_name : peer_name_list)
-        {
-            int ret = makeConnectionIfNeeded(peer_name);
-            if (ret)
-                return ret;
-        }
-        int ret = protocol_->send(peer_name_list, buffer_list);
+        int ret = makeConnectionIfNeeded(peer_name);
+        if (ret)
+            return ret;
+        ret = protocol_->send(peer_name, buffer_list);
         if (ret < 0)
-            for (auto &peer_name : peer_name_list)
-                session_manager_->disconnect(peer_name);
+            session_manager_->disconnect(peer_name);
         return ret;
     }
 

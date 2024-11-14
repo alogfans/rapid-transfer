@@ -280,7 +280,7 @@ int sender()
     };
 
     *(uint64_t *)addr = file_size;
-    TaskID task_id = engine->send({FLAGS_target}, {{addr, sizeof(uint64_t)}});
+    TaskID task_id = engine->send(FLAGS_target, {{addr, sizeof(uint64_t)}});
     if (wait_for_completion(task_id))
     {
         cleanup();
