@@ -7,37 +7,36 @@
 #include "rdma_endpoint.h"
 #include "rdma_ud_endpoint_store.h"
 
-namespace rapid
-{
-    class RdmaUDEndPoint : public RdmaEndPoint
-    {
-    public:
-        RdmaUDEndPoint(RdmaUDEndPointStore &store);
+namespace rapid {
+class RdmaUDEndPoint : public RdmaEndPoint {
+   public:
+    RdmaUDEndPoint(RdmaUDEndPointStore &store);
 
-        virtual ~RdmaUDEndPoint();
+    virtual ~RdmaUDEndPoint();
 
-    public:
-        virtual bool connected() const { return connected_; }
+   public:
+    virtual bool connected() const { return connected_; }
 
-        virtual std::vector<uint32_t> qpNum() const { return store_.qpNum(); }
+    virtual std::vector<uint32_t> qpNum() const { return store_.qpNum(); }
 
-        virtual int setupConnection(const std::string &peer_gid, uint16_t peer_lid, std::vector<uint32_t> peer_qp_num_list);
+    virtual int setupConnection(const std::string &peer_gid, uint16_t peer_lid,
+                                std::vector<uint32_t> peer_qp_num_list);
 
-        virtual int postSendRequest(const std::vector<Request *> &request_list);
+    virtual int postSendRequest(const std::vector<Request *> &request_list);
 
-        virtual int postReceiveRequest(const std::vector<Request *> &request_list);
+    virtual int postReceiveRequest(const std::vector<Request *> &request_list);
 
-    private:
-        RdmaUDEndPointStore &store_;
-        bool connected_;
+   private:
+    RdmaUDEndPointStore &store_;
+    bool connected_;
 
-        std::string peer_gid_;
-        uint16_t peer_lid_;
-        std::vector<uint32_t> peer_qp_num_list_;
+    std::string peer_gid_;
+    uint16_t peer_lid_;
+    std::vector<uint32_t> peer_qp_num_list_;
 
-        ibv_ah *ah_;
-    };
+    ibv_ah *ah_;
+};
 
-}
+}  // namespace rapid
 
-#endif // RDMA_UD_ENDPOINT_H
+#endif  // RDMA_UD_ENDPOINT_H

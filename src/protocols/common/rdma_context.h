@@ -4,123 +4,118 @@
 #ifndef RDMA_CONTEXT_H
 #define RDMA_CONTEXT_H
 
-#include "concurrency.h"
+#include <gflags/gflags.h>
+#include <glog/logging.h>
+#include <infiniband/verbs.h>
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <gflags/gflags.h>
-#include <glog/logging.h>
-#include <infiniband/verbs.h>
 #include <list>
 #include <memory>
 #include <string>
 #include <thread>
 #include <unordered_map>
 
-namespace rapid
-{
-    class RdmaRCEndPoint;
-    class RdmaRCEndPointStore;
+#include "concurrency.h"
 
-    enum
-    {
-        SEND_CQ,
-        RECV_CQ
-    };
+namespace rapid {
+class RdmaRCEndPoint;
+class RdmaRCEndPointStore;
 
-    class RdmaContext
-    {
-    public:
-        RdmaContext();
+enum { SEND_CQ, RECV_CQ };
 
-        ~RdmaContext();
+class RdmaContext {
+   public:
+    RdmaContext();
 
-        int construct(const std::string &device_name,
-                      uint8_t rdma_port,
-                      int gid_index);
+    ~RdmaContext();
 
-        int deconstruct();
+    int construct(const std::string &device_name, uint8_t rdma_port,
+                  int gid_index);
 
-    public:
-        int registerMemoryRegion(void *addr, size_t length, int access);
+    int deconstruct();
 
-        int unregisterMemoryRegion(void *addr);
+   public:
+    int registerMemoryRegion(void *addr, size_t length, int access);
 
-        std::pair<uint32_t, uint32_t> key(void *addr);
+    int unregisterMemoryRegion(void *addr);
 
-        bool active() const { return active_; }
+    std::pair<uint32_t, uint32_t> key(void *addr);
 
-        void set_active(bool flag) { active_ = flag; }
+    bool active() const { return active_; }
 
-    public:
-        std::string deviceName() const { return device_name_; }
+    void set_active(bool flag) { active_ = flag; }
 
-    public:
-        uint16_t lid() const { return lid_; }
+   public:
+    std::string deviceName() const { return device_name_; }
 
-        std::string gid() const;
+   public:
+    uint16_t lid() const { return lid_; }
 
-        int gidIndex() const { return gid_index_; }
+    std::string gid() const;
 
-        ibv_context *context() const { return context_; }
+    int gidIndex() const { return gid_index_; }
 
-        ibv_pd *pd() const { return pd_; }
+    ibv_context *context() const { return context_; }
 
-        uint8_t portNum() const { return port_; }
+    ibv_pd *pd() const { return pd_; }
 
-        int activeSpeed() const { return active_speed_; }
+    uint8_t portNum() const { return port_; }
 
-        ibv_mtu activeMTU() const { return active_mtu_; }
+    int activeSpeed() const { return active_speed_; }
 
-        ibv_comp_channel *compChannel();
+    ibv_mtu activeMTU() const { return active_mtu_; }
 
-        int compVector();
+    ibv_comp_channel *compChannel();
 
-        int eventFd() const { return event_fd_; }
+    int compVector();
 
-        int poll(int num_entries, ibv_wc *wc, int cq_index = 0);
+    int eventFd() const { return event_fd_; }
 
-        int socketId();
+    int poll(int num_entries, ibv_wc *wc, int cq_index = 0);
 
-        ibv_cq *cq(int type) { return cq_list_[type]; }
+    int socketId();
 
-    private:
-        int openRdmaDevice(const std::string &device_name, uint8_t port, int gid_index);
+    ibv_cq *cq(int type) { return cq_list_[type]; }
 
-        int joinNonblockingPollList(int event_fd, int data_fd);
+   private:
+    int openRdmaDevice(const std::string &device_name, uint8_t port,
+                       int gid_index);
 
-    private:
-        std::string device_name_;
+    int joinNonblockingPollList(int event_fd, int data_fd);
 
-        ibv_context *context_ = nullptr;
-        ibv_pd *pd_ = nullptr;
-        int event_fd_ = -1;
+   private:
+    std::string device_name_;
 
-        size_t num_comp_channel_ = 0;
-        ibv_comp_channel **comp_channel_ = nullptr;
+    ibv_context *context_ = nullptr;
+    ibv_pd *pd_ = nullptr;
+    int event_fd_ = -1;
 
-        uint8_t port_ = 0;
-        uint16_t lid_ = 0;
-        int gid_index_ = -1;
-        int active_speed_ = -1;
-        ibv_mtu active_mtu_;
-        ibv_gid gid_;
+    size_t num_comp_channel_ = 0;
+    ibv_comp_channel **comp_channel_ = nullptr;
 
-        RWSpinlock memory_regions_lock_;
-        std::vector<ibv_mr *> memory_region_list_;
-        std::vector<ibv_cq *> cq_list_;
+    uint8_t port_ = 0;
+    uint16_t lid_ = 0;
+    int gid_index_ = -1;
+    int active_speed_ = -1;
+    ibv_mtu active_mtu_;
+    ibv_gid gid_;
 
-        std::vector<std::thread> background_thread_;
-        std::atomic<bool> threads_running_;
+    RWSpinlock memory_regions_lock_;
+    std::vector<ibv_mr *> memory_region_list_;
+    std::vector<ibv_cq *> cq_list_;
 
-        std::atomic<int> next_comp_channel_index_;
-        std::atomic<int> next_comp_vector_index_;
-        std::atomic<int> next_cq_list_index_;
+    std::vector<std::thread> background_thread_;
+    std::atomic<bool> threads_running_;
 
-        volatile bool active_;
-    };
+    std::atomic<int> next_comp_channel_index_;
+    std::atomic<int> next_comp_vector_index_;
+    std::atomic<int> next_cq_list_index_;
 
-}
+    volatile bool active_;
+};
 
-#endif // RDMA_CONTEXT_H
+}  // namespace rapid
+
+#endif  // RDMA_CONTEXT_H

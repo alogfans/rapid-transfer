@@ -6,45 +6,40 @@
 
 #include "rapid_transfer.h"
 
-namespace rapid
-{
-    enum RequestType
-    {
-        SEND,
-        RECEIVE
-    };
+namespace rapid {
+enum RequestType { SEND, RECEIVE };
 
-    struct Protocol
-    {
-        Protocol() {}
-        virtual ~Protocol() {}
-        Protocol(const Protocol &) = delete;
-        Protocol &operator=(const Protocol &) = delete;
+struct Protocol {
+    Protocol() {}
+    virtual ~Protocol() {}
+    Protocol(const Protocol &) = delete;
+    Protocol &operator=(const Protocol &) = delete;
 
-        virtual int construct(const std::string &device_name,
-                              uint8_t rdma_port,
-                              int gid_index) = 0;
+    virtual int construct(const std::string &device_name, uint8_t rdma_port,
+                          int gid_index) = 0;
 
-        virtual int deconstruct() = 0;
+    virtual int deconstruct() = 0;
 
-        virtual int prepareConnection(const std::string &peer_name, Attributes &local) = 0;
+    virtual int prepareConnection(const std::string &peer_name,
+                                  Attributes &local) = 0;
 
-        virtual int setupConnection(const std::string &peer_name, const Attributes &peer) = 0;
+    virtual int setupConnection(const std::string &peer_name,
+                                const Attributes &peer) = 0;
 
-        virtual TaskID send(const std::string &peer_name,
-                            const std::vector<Buffer> &buffer_list) = 0;
+    virtual TaskID send(const std::string &peer_name,
+                        const std::vector<Buffer> &buffer_list) = 0;
 
-        virtual TaskID receive(const std::string &peer_name,
-                               const std::vector<Buffer> &buffer_list) = 0;
+    virtual TaskID receive(const std::string &peer_name,
+                           const std::vector<Buffer> &buffer_list) = 0;
 
-        virtual Status getStatus(TaskID task_id, size_t *transferred_bytes) = 0;
+    virtual Status getStatus(TaskID task_id, size_t *transferred_bytes) = 0;
 
-        virtual int freeTask(TaskID task_id) = 0;
+    virtual int freeTask(TaskID task_id) = 0;
 
-        virtual int registerLocalMemory(void *addr, size_t length) = 0;
+    virtual int registerLocalMemory(void *addr, size_t length) = 0;
 
-        virtual int unregisterLocalMemory(void *addr) = 0;
-    };
-}
+    virtual int unregisterLocalMemory(void *addr) = 0;
+};
+}  // namespace rapid
 
-#endif // PROTOCOL_H
+#endif  // PROTOCOL_H
