@@ -56,7 +56,7 @@ namespace rapid
                                                      const std::string &device_name,
                                                      const std::string &local_name = "",
                                                      uint8_t rdma_port = 1,
-                                                     int gid_index = 3);
+                                                     int gid_index = 0);
 
         RapidTransfer(const std::string &device_name);
 

@@ -56,7 +56,7 @@ int receiveThread(int thread_id)
 {
     uint16_t port = FLAGS_first_port + thread_id;
     std::string local_hostname = getLocalHostname() + std::to_string(port);
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname);
+    auto engine = rapid::RapidTransfer::Create("rdma_unreliable", FLAGS_device, local_hostname, 1, 1);
     assert(engine);
 
     const size_t dram_buffer_size = 64 * 1024 * 1024;
@@ -127,7 +127,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id)
 {
     uint16_t port = FLAGS_first_port + thread_id;
     std::string local_hostname = getLocalHostname() + std::to_string(port);
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, local_hostname);
+    auto engine = rapid::RapidTransfer::Create("rdma_unreliable", FLAGS_device, local_hostname, 1, 1);
     assert(engine);
     uint64_t transferred_bytes = 0;
 

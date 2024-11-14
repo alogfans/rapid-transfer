@@ -194,13 +194,20 @@ namespace rapid
 
             EncodePacket(hdr, record.hdr);
 
+#ifdef SGE
             Request *request = new Request{
                 .addr = {hdr, record.data},
                 .length = {sizeof(PacketHeader), record.hdr.len},
                 .lkey = {
                     context.key(hdr).first,
                     context.key(record.data).first}};
-
+#else
+            memcpy(&hdr[1], record.data, record.hdr.len);
+            Request *request = new Request{
+                .addr = {hdr},
+                .length = {sizeof(PacketHeader)},
+                .lkey = {context.key(hdr).first}};
+#endif
             auto endpoint = processor_->endpoint_store_.getOrCreateEndpoint(record.peer_name);
             if (!endpoint)
             {
