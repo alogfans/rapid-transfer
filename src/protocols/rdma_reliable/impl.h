@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <queue>
 
 #include "concurrency.h"
 #include "protocol.h"
@@ -56,6 +57,7 @@ struct RdmaReliableProtocol : public Protocol {
         const RequestType type;
         const TaskID id;
 
+        std::shared_ptr<RdmaRCEndPoint> endpoint;
         std::vector<Request *> request_list;
     };
 
@@ -71,8 +73,10 @@ struct RdmaReliableProtocol : public Protocol {
     bool valid_;
 
     std::atomic<int> next_task_id_;
+
     RWSpinlock task_map_lock_;
     std::unordered_map<TaskID, std::shared_ptr<Task>> task_map_;
+    std::queue<TaskID> pending_task_;
 
     RdmaContext context_;
     RdmaRCEndPointStore endpoint_store_;

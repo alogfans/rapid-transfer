@@ -63,9 +63,7 @@ int RdmaReliableProtocol::setupConnection(const std::string &peer_name,
     auto lid = (uint16_t)std::stoi(peer.at("lid"));
     auto gid = peer.at("gid");
     auto qp_num_list = FromString(peer.at("qp"));
-    int ret = endpoint->setupConnection(gid, lid, qp_num_list);
-    if (ret) return ret;
-    return 0;
+    return endpoint->setupConnection(gid, lid, qp_num_list);
 }
 
 int RdmaReliableProtocol::freeTask(TaskID task_id) {
@@ -96,14 +94,15 @@ TaskID RdmaReliableProtocol::send(const std::string &peer_name,
     }
 
     auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
-    if (!endpoint || !endpoint->connected()) return -1;
-
-    // TODO it should be executed in background!!!
-    int ret = endpoint->postSendRequest(task->request_list);
-    if (ret != (int)buffer_list.size()) {
-        LOG(INFO) << "Unable to post request";
+    if (!endpoint || !endpoint->connected()) {
+        freeTask(task->id);
         return -1;
     }
+
+    task->endpoint = std::move(endpoint);
+    task_map_lock_.lock();
+    pending_task_.push(task->id);
+    task_map_lock_.unlock();
 
     return task->id;
 }
@@ -129,14 +128,15 @@ TaskID RdmaReliableProtocol::receive(const std::string &peer_name,
     }
 
     auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_name);
-    if (!endpoint || !endpoint->connected()) return -1;
-
-    // TODO it should be executed in background!!!
-    int ret = endpoint->postReceiveRequest(task->request_list);
-    if (ret != (int)buffer_list.size()) {
-        LOG(INFO) << "Unable to post request";
+    if (!endpoint || !endpoint->connected()) {
+        freeTask(task->id);
         return -1;
     }
+
+    task->endpoint = std::move(endpoint);
+    task_map_lock_.lock();
+    pending_task_.push(task->id);
+    task_map_lock_.unlock();
 
     return task->id;
 }
@@ -186,9 +186,42 @@ int RdmaReliableProtocol::unregisterLocalMemory(void *addr) {
 }
 
 void RdmaReliableProtocol::runBackgroundWorker() {
+    size_t inflight_requests = 0;
+    const size_t max_inflight_requests = 256;
+    std::shared_ptr<Task> task;
     while (background_running_) {
-        poll(SEND);
-        poll(RECEIVE);
+        task_map_lock_.lock();
+        if (!task && !pending_task_.empty()) {
+            task = task_map_[pending_task_.front()];
+            pending_task_.pop();
+        }
+        task_map_lock_.unlock();
+        if (task && inflight_requests + task->request_list.size() <= max_inflight_requests) {
+            if (task->type == SEND) {
+                int ret = task->endpoint->postSendRequest(task->request_list);
+                if (ret != (int)task->request_list.size()) {
+                    LOG(INFO) << "Unable to post request";
+                    for (size_t i = ret; i < task->request_list.size(); ++i)
+                        task->request_list[i]->status = FAILED;
+                }
+            } else {
+                int ret =
+                    task->endpoint->postReceiveRequest(task->request_list);
+                if (ret != (int)task->request_list.size()) {
+                    LOG(INFO) << "Unable to post request";
+                    for (size_t i = ret; i < task->request_list.size(); ++i)
+                        task->request_list[i]->status = FAILED;
+                }
+            }
+        }
+
+        int ret = poll(SEND);
+        if (ret > 0)
+            inflight_requests -= ret;
+
+        ret = poll(RECEIVE);
+        if (ret > 0)
+            inflight_requests -= ret;
     }
 }
 
@@ -215,6 +248,6 @@ int RdmaReliableProtocol::poll(int cq_index) {
             request->status = SUCCESS;
     }
 
-    return 0;
+    return nr_poll;
 }
 }  // namespace rapid
