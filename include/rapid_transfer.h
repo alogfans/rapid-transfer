@@ -46,8 +46,8 @@ class RapidTransfer {
     // Return Value: RapidTransfer pointer if success, nullptr if failed
     static std::shared_ptr<RapidTransfer> Create(const std::string &protocol,
                                                  const std::string &device_name,
-                                                 uint8_t rdma_port = 1,
-                                                 int gid_index = 0);
+                                                 uint8_t rdma_port,
+                                                 int gid_index);
 
     RapidTransfer(const std::string &device_name);
 
