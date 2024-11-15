@@ -21,6 +21,7 @@ DEFINE_uint32(num_qp_per_endpoint, 1, "Number of QPs per endpoint");
 DEFINE_uint32(max_sge_per_wr, 1, "Max SGE count per work request");
 DEFINE_uint32(max_wr_per_qp, 256, "Max WR count per QP");
 DEFINE_uint32(max_inline_bytes, 0, "Inline bytes for data sending");
+DEFINE_uint32(max_cqe_count, 4096, "Max CQE count");
 
 namespace rapid {
 RdmaContext::RdmaContext()
@@ -38,6 +39,7 @@ RdmaContext::RdmaContext()
     config_.max_sge_per_wr = FLAGS_max_sge_per_wr;
     config_.max_wr_per_qp = FLAGS_max_wr_per_qp;
     config_.max_inline_bytes = FLAGS_max_inline_bytes;
+    config_.max_cqe_count = FLAGS_max_cqe_count;
 }
 
 RdmaContext::~RdmaContext() {
@@ -49,8 +51,6 @@ int RdmaContext::construct(const std::string &device_name, uint8_t rdma_port,
     device_name_ = device_name;
     num_comp_channel_ = 1;
     const static size_t num_cq_list = 2;
-    const static size_t max_cqe = 4096;
-
     if (openRdmaDevice(device_name_, rdma_port, gid_index)) {
         PLOG(ERROR) << "RDMA context setup failed: open device";
         return -1;
@@ -97,7 +97,7 @@ int RdmaContext::construct(const std::string &device_name, uint8_t rdma_port,
 
     cq_list_.resize(num_cq_list);
     for (size_t i = 0; i < num_cq_list; ++i) {
-        cq_list_[i] = ibv_create_cq(context_, max_cqe, this /* CQ context */,
+        cq_list_[i] = ibv_create_cq(context_, config_.max_cqe_count, this /* CQ context */,
                                     compChannel(), compVector());
         if (!cq_list_[i]) {
             PLOG(ERROR) << "RDMA context setup failed: completion queue";

@@ -21,7 +21,7 @@ RdmaRCEndPoint::~RdmaRCEndPoint() {
 }
 
 int RdmaRCEndPoint::construct(ibv_cq *send_cq, ibv_cq *recv_cq,
-                              size_t num_qp_list, size_t max_sge_per_wr,
+                              size_t num_qp_per_endpoint, size_t max_sge_per_wr,
                               size_t max_wr_depth, size_t max_inline_bytes) {
     if (status_.load(std::memory_order_relaxed) != INITIALIZING) {
         PLOG(ERROR) << "Endpoint has already been constructed";
@@ -29,11 +29,11 @@ int RdmaRCEndPoint::construct(ibv_cq *send_cq, ibv_cq *recv_cq,
     }
 
     max_wr_depth_ = (int)max_wr_depth;
-    qp_list_.resize(num_qp_list);
-    send_wr_depth_list_ = new volatile int[num_qp_list];
-    recv_wr_depth_list_ = new volatile int[num_qp_list];
+    qp_list_.resize(num_qp_per_endpoint);
+    send_wr_depth_list_ = new volatile int[num_qp_per_endpoint];
+    recv_wr_depth_list_ = new volatile int[num_qp_per_endpoint];
 
-    for (size_t i = 0; i < num_qp_list; ++i) {
+    for (size_t i = 0; i < num_qp_per_endpoint; ++i) {
         send_wr_depth_list_[i] = 0;
         recv_wr_depth_list_[i] = 0;
         ibv_qp_init_attr attr;

@@ -76,7 +76,7 @@ TaskID RdmaUnreliableProtocol::send(const std::string &peer_name,
 TaskID RdmaUnreliableProtocol::receive(const std::string &peer_name,
                                        const std::vector<Buffer> &buffer_list) {
     RWSpinlock::WriteGuard guard(task_lock_);
-    auto task_id = next_task_id_.fetch_add(1);
+    auto task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
     TaskInfo info;
     info.type = RECEIVE;
     int ret = processors_->issuePackets(peer_name, info.type, buffer_list,

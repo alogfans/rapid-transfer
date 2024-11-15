@@ -13,8 +13,9 @@ class RdmaRCEndPoint : public RdmaEndPoint {
 
     virtual ~RdmaRCEndPoint();
 
-    int construct(ibv_cq *send_cq, ibv_cq *recv_cq, size_t num_qp_list,
-                  size_t max_sge, size_t max_wr, size_t max_inline);
+    int construct(ibv_cq *send_cq, ibv_cq *recv_cq, size_t num_qp_per_endpoint,
+                  size_t max_sge_per_wr, size_t max_wr_per_qp,
+                  size_t max_inline_bytes);
 
     int deconstruct();
 

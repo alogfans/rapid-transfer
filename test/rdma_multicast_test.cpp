@@ -13,7 +13,7 @@ const static size_t kBufferSize = 4096;
 int sender()
 {
     RdmaMulticastContext context;
-    int ret = context.construct(FLAGS_device, kMulticastAddress, 1);
+    int ret = context.construct(FLAGS_device, kMulticastAddress);
     assert(ret == 0);
     void *buffer = malloc(kBufferSize);
     strcpy((char *) buffer, "Hello world!");
@@ -41,7 +41,7 @@ int sender()
 int receiver()
 {
     RdmaMulticastContext context;
-    int ret = context.construct(FLAGS_device, kMulticastAddress, 1);
+    int ret = context.construct(FLAGS_device, kMulticastAddress);
     assert(ret == 0);
     void *buffer = malloc(kBufferSize);
     ret = context.registerMemoryRegion(buffer, kBufferSize, IBV_ACCESS_LOCAL_WRITE);

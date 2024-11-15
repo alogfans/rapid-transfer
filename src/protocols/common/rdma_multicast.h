@@ -17,12 +17,21 @@
 namespace rapid {
 class RdmaMulticastContext {
    public:
+    struct Config {
+        size_t num_qp_per_endpoint;
+        size_t max_sge_per_wr;
+        size_t max_wr_per_qp;
+        size_t max_inline_bytes;
+        size_t max_cqe_count;
+    };
+    
+   public:
     RdmaMulticastContext();
 
     ~RdmaMulticastContext();
 
-    int construct(const std::string &local_addr,
-                  const std::string &multicast_addr, size_t num_connections);
+    /* local_addr must be bond with IB device! */
+    int construct(const std::string &local_addr, const std::string &multicast_addr);
 
     int deconstruct();
 
@@ -31,6 +40,8 @@ class RdmaMulticastContext {
     int unregisterMemoryRegion(void *addr);
 
     std::pair<uint32_t, uint32_t> key(void *addr, int conn_index = 0);
+
+    const Config &config() const { return config_; }
 
    public:
     int postSendRequest(const std::vector<Request *> &request_list,
@@ -88,6 +99,7 @@ class RdmaMulticastContext {
     std::thread event_thread_;
 
     std::function<int(ibv_qp *)> on_init_qp_hook_;
+    Config config_;
 };
 }  // namespace rapid
 

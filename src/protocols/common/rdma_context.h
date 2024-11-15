@@ -32,6 +32,7 @@ class RdmaContext {
         size_t max_sge_per_wr;
         size_t max_wr_per_qp;
         size_t max_inline_bytes;
+        size_t max_cqe_count;
     };
 
    public:

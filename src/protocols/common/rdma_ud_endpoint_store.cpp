@@ -7,17 +7,17 @@
 
 namespace rapid {
 int RdmaUDEndPointStore::construct(ibv_cq *send_cq, ibv_cq *recv_cq,
-                                   size_t num_qp_list, size_t max_sge_per_wr,
-                                   size_t max_wr_depth,
+                                   size_t num_qp_per_endpoint,
+                                   size_t max_sge_per_wr, size_t max_wr_per_qp,
                                    size_t max_inline_bytes) {
     send_cq_ = send_cq;
     recv_cq_ = recv_cq;
-    max_wr_depth_ = (int)max_wr_depth;
-    qp_list_.resize(num_qp_list);
-    send_wr_depth_list_ = new volatile int[num_qp_list];
-    recv_wr_depth_list_ = new volatile int[num_qp_list];
+    max_wr_depth_ = (int)max_wr_per_qp;
+    qp_list_.resize(num_qp_per_endpoint);
+    send_wr_depth_list_ = new volatile int[num_qp_per_endpoint];
+    recv_wr_depth_list_ = new volatile int[num_qp_per_endpoint];
 
-    for (size_t i = 0; i < num_qp_list; ++i) {
+    for (size_t i = 0; i < num_qp_per_endpoint; ++i) {
         send_wr_depth_list_[i] = 0;
         recv_wr_depth_list_[i] = 0;
         ibv_qp_init_attr attr;
@@ -26,7 +26,7 @@ int RdmaUDEndPointStore::construct(ibv_cq *send_cq, ibv_cq *recv_cq,
         attr.recv_cq = recv_cq;
         attr.sq_sig_all = false;
         attr.qp_type = IBV_QPT_UD;
-        attr.cap.max_send_wr = attr.cap.max_recv_wr = max_wr_depth;
+        attr.cap.max_send_wr = attr.cap.max_recv_wr = max_wr_per_qp;
         attr.cap.max_send_sge = attr.cap.max_recv_sge = max_sge_per_wr;
         attr.cap.max_inline_data = max_inline_bytes;
         qp_list_[i] = ibv_create_qp(context_.pd(), &attr);

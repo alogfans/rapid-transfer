@@ -18,9 +18,9 @@ class RdmaUDEndPointStore {
     ~RdmaUDEndPointStore() { deconstruct(); }
 
    public:
-    int construct(ibv_cq *send_cq, ibv_cq *recv_cq, size_t num_qp_list = 1,
-                  size_t max_sge = 4, size_t max_wr = 256,
-                  size_t max_inline = 64);
+    int construct(ibv_cq *send_cq, ibv_cq *recv_cq, size_t num_qp_per_endpoint,
+                  size_t max_sge_per_wr, size_t max_wr_per_qp,
+                  size_t max_inline_bytes);
 
     int deconstruct();
 

@@ -4,13 +4,14 @@
 #include <glog/logging.h>
 #include <sys/fcntl.h>
 
+DECLARE_uint32(num_qp_per_endpoint);
+DECLARE_uint32(max_sge_per_wr);
+DECLARE_uint32(max_wr_per_qp);
+DECLARE_uint32(max_inline_bytes);
+DECLARE_uint32(max_cqe_count);
+
 namespace rapid {
-
-const static int max_cqe_count = 256;
-const static int max_wr_count = 256;
-const static int max_sge_count = 2;
-
-static int setNonBlocking(int fd) {
+static inline int setNonBlocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
         PLOG(ERROR) << "Get file descriptor flags failed";
@@ -22,15 +23,6 @@ static int setNonBlocking(int fd) {
     }
     return 0;
 }
-
-RdmaMulticastContext::RdmaMulticastContext()
-    : event_channel_(nullptr),
-      local_addr_(nullptr),
-      multicast_addr_(nullptr),
-      running_(false),
-      num_active_connections_(0) {}
-
-RdmaMulticastContext::~RdmaMulticastContext() { deconstruct(); }
 
 static int getAddress(const std::string &dst, struct sockaddr *addr) {
     struct addrinfo *res;
@@ -45,9 +37,23 @@ static int getAddress(const std::string &dst, struct sockaddr *addr) {
     return 0;
 }
 
+RdmaMulticastContext::RdmaMulticastContext()
+    : event_channel_(nullptr),
+      local_addr_(nullptr),
+      multicast_addr_(nullptr),
+      running_(false),
+      num_active_connections_(0) {
+    config_.num_qp_per_endpoint = FLAGS_num_qp_per_endpoint;
+    config_.max_sge_per_wr = FLAGS_max_sge_per_wr;
+    config_.max_wr_per_qp = FLAGS_max_wr_per_qp;
+    config_.max_inline_bytes = FLAGS_max_inline_bytes;
+    config_.max_cqe_count = FLAGS_max_cqe_count;
+}
+
+RdmaMulticastContext::~RdmaMulticastContext() { deconstruct(); }
+
 int RdmaMulticastContext::construct(const std::string &local_addr,
-                                    const std::string &multicast_addr,
-                                    size_t num_connections) {
+                                    const std::string &multicast_addr) {
     event_channel_ = rdma_create_event_channel();
     if (!event_channel_) {
         PLOG(ERROR) << "Failed to create event channel";
@@ -70,8 +76,8 @@ int RdmaMulticastContext::construct(const std::string &local_addr,
     ret = getAddress(multicast_addr, multicast_addr_);
     if (ret) return ret;
 
-    connections_.resize(num_connections);
-    for (size_t i = 0; i < num_connections; ++i) {
+    connections_.resize(config_.num_qp_per_endpoint);
+    for (size_t i = 0; i < config_.num_qp_per_endpoint; ++i) {
         auto &connection = connections_[i];
         ret = rdma_create_id(event_channel_, &connection.cm_id, &connection,
                              RDMA_PS_UDP);
@@ -224,7 +230,7 @@ int RdmaMulticastContext::postSendRequest(
     if (conn_index < 0 || conn_index >= (int)connections_.size()) return -1;
 
     auto &connection = connections_[conn_index];
-    int wr_count = std::min(max_wr_count - connection.send_wr_depth,
+    int wr_count = std::min((int)config_.max_wr_per_qp - connection.send_wr_depth,
                             (int)request_list.size());
     if (wr_count == 0) return 0;
 
@@ -277,7 +283,7 @@ int RdmaMulticastContext::postReceiveRequest(
     if (conn_index < 0 || conn_index >= (int)connections_.size()) return -1;
 
     auto &connection = connections_[conn_index];
-    int wr_count = std::min(max_wr_count - connection.recv_wr_depth,
+    int wr_count = std::min((int)config_.max_wr_per_qp - connection.recv_wr_depth,
                             (int)request_list.size());
     if (wr_count == 0) return 0;
 
@@ -338,7 +344,7 @@ int RdmaMulticastContext::createQueuePair(Connection *connection) {
         return -1;
     }
 
-    connection->cq = ibv_create_cq(verbs, max_cqe_count, this, 0, 0);
+    connection->cq = ibv_create_cq(verbs, config_.max_cqe_count, this, 0, 0);
     if (!connection->cq) {
         PLOG(ERROR) << "Failed to create CQ";
         return -1;
@@ -346,10 +352,10 @@ int RdmaMulticastContext::createQueuePair(Connection *connection) {
 
     struct ibv_qp_init_attr attr;
     memset(&attr, 0, sizeof(attr));
-    attr.cap.max_send_wr = max_wr_count;
-    attr.cap.max_recv_wr = max_wr_count;
-    attr.cap.max_send_sge = max_sge_count;
-    attr.cap.max_recv_sge = max_sge_count;
+    attr.cap.max_send_wr = config_.max_wr_per_qp;
+    attr.cap.max_recv_wr = config_.max_wr_per_qp;
+    attr.cap.max_send_sge = config_.max_sge_per_wr;
+    attr.cap.max_recv_sge = config_.max_sge_per_wr;
     attr.qp_context = this;
     attr.sq_sig_all = false;
     attr.qp_type = IBV_QPT_UD;

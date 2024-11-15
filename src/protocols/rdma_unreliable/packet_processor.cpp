@@ -29,8 +29,17 @@ PacketProcessor::~PacketProcessor() {}
 
 int PacketProcessor::construct() {
     if (running_) return 0;
-    int ret = endpoint_store_.construct(protocol_.context_.cq(SEND_CQ),
-                                        protocol_.context_.cq(RECV_CQ));
+    auto &context = protocol_.context_;
+    if (context.config().max_sge_per_wr < 2) {
+        LOG(ERROR) << "max_sge_per_wr must be no less than 2";
+        return -1;
+    }
+    int ret = endpoint_store_.construct(context.cq(SEND_CQ),
+                                        context.cq(RECV_CQ),
+                                        context.config().num_qp_per_endpoint,
+                                        context.config().max_sge_per_wr,
+                                        context.config().max_wr_per_qp,
+                                        context.config().max_inline_bytes);
     if (ret) return ret;
     running_ = true;
     event_loop_.construct();
