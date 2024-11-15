@@ -36,8 +36,14 @@ class RdmaRCEndPointStore {
             return endpoint_map_[peer_nic_path];
 
         auto endpoint = std::make_shared<RdmaRCEndPoint>(context_);
+        auto &config = context_.config();
         int ret =
-            endpoint->construct(context_.cq(SEND_CQ), context_.cq(RECV_CQ));
+            endpoint->construct(context_.cq(SEND_CQ), 
+                                context_.cq(RECV_CQ),
+                                config.num_qp_per_endpoint,
+                                config.max_sge_per_wr,
+                                config.max_wr_per_qp,
+                                config.max_inline_bytes);
         if (ret) return nullptr;
         endpoint_map_[peer_nic_path] = endpoint;
         return endpoint;

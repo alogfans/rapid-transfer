@@ -21,6 +21,7 @@
 #include <thread>
 
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
+DEFINE_string(protocol, "rdma_reliable", "Transport protocol: rdma_reliable, rdma_unreliable");
 DEFINE_string(path, "", "Path of file to transfer");
 DEFINE_string(device, "mlx5_2", "RDMA device name to use");
 DEFINE_string(target, "optane21:12348", "Target hostname (and port, if needed)");
@@ -94,7 +95,7 @@ static inline ssize_t readFully(int fd, void *buf, size_t len)
 
 int receiver()
 {
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
+    auto engine = rapid::RapidTransfer::Create(FLAGS_protocol, FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
     const size_t dram_buffer_size = 1ull << 30;
@@ -213,7 +214,7 @@ int receiver()
 
 int sender()
 {
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
+    auto engine = rapid::RapidTransfer::Create(FLAGS_protocol, FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
     const size_t dram_buffer_size = 1ull << 30;

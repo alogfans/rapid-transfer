@@ -21,6 +21,7 @@
 #include <thread>
 
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
+DEFINE_string(protocol, "rdma_reliable", "Transport protocol: rdma_reliable, rdma_unreliable");
 DEFINE_string(device, "mlx5_3", "RDMA device name to use");
 DEFINE_string(target_hostname, "optane21", "Target hostname (and port, if needed)");
 DEFINE_uint32(first_port, 12345, "First TCP port for connecting");
@@ -44,7 +45,7 @@ static void freeMemoryPool(void *addr, size_t size)
 int receiveThread(int thread_id)
 {
     uint16_t port = FLAGS_first_port + thread_id;
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
+    auto engine = rapid::RapidTransfer::Create(FLAGS_protocol, FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
     const size_t dram_buffer_size = 64 * 1024 * 1024;
@@ -113,7 +114,7 @@ std::atomic<uint64_t> g_transferred_bytes = 0;
 
 int sendThread(pthread_barrier_t *barrier, int thread_id)
 {
-    auto engine = rapid::RapidTransfer::Create("rdma_reliable", FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
+    auto engine = rapid::RapidTransfer::Create(FLAGS_protocol, FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
     uint64_t transferred_bytes = 0;
 

@@ -17,6 +17,11 @@
 #include "rdma_rc_endpoint.h"
 #include "rdma_rc_endpoint_store.h"
 
+DEFINE_uint32(num_qp_per_endpoint, 1, "Number of QPs per endpoint");
+DEFINE_uint32(max_sge_per_wr, 1, "Max SGE count per work request");
+DEFINE_uint32(max_wr_per_qp, 256, "Max WR count per QP");
+DEFINE_uint32(max_inline_bytes, 0, "Inline bytes for data sending");
+
 namespace rapid {
 RdmaContext::RdmaContext()
     : next_comp_channel_index_(0),
@@ -29,6 +34,10 @@ RdmaContext::RdmaContext()
             PLOG(ERROR) << "RDMA context setup failed: fork compatibility";
     };
     std::call_once(g_once_flag, fork_init);
+    config_.num_qp_per_endpoint = FLAGS_num_qp_per_endpoint;
+    config_.max_sge_per_wr = FLAGS_max_sge_per_wr;
+    config_.max_wr_per_qp = FLAGS_max_wr_per_qp;
+    config_.max_inline_bytes = FLAGS_max_inline_bytes;
 }
 
 RdmaContext::~RdmaContext() {

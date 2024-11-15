@@ -27,6 +27,14 @@ enum { SEND_CQ, RECV_CQ };
 
 class RdmaContext {
    public:
+    struct Config {
+        size_t num_qp_per_endpoint;
+        size_t max_sge_per_wr;
+        size_t max_wr_per_qp;
+        size_t max_inline_bytes;
+    };
+
+   public:
     RdmaContext();
 
     ~RdmaContext();
@@ -46,6 +54,8 @@ class RdmaContext {
     bool active() const { return active_; }
 
     void set_active(bool flag) { active_ = flag; }
+
+    const Config &config() const { return config_; }
 
    public:
     std::string deviceName() const { return device_name_; }
@@ -114,6 +124,7 @@ class RdmaContext {
     std::atomic<int> next_cq_list_index_;
 
     volatile bool active_;
+    Config config_;
 };
 
 }  // namespace rapid

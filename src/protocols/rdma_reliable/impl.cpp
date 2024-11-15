@@ -38,6 +38,8 @@ int RdmaReliableProtocol::construct(const std::string &device_name,
 int RdmaReliableProtocol::deconstruct() {
     if (!valid_) return 0;
     if (background_running_.exchange(false)) background_worker_.join();
+    task_map_.clear();
+    while (!pending_task_.empty()) pending_task_.pop();
     endpoint_store_.deconstruct();
     context_.deconstruct();
     valid_ = false;
@@ -187,8 +189,8 @@ int RdmaReliableProtocol::unregisterLocalMemory(void *addr) {
 
 void RdmaReliableProtocol::runBackgroundWorker() {
     size_t inflight_requests = 0;
-    const size_t max_inflight_requests = 256;
-    std::shared_ptr<Task> task;
+    const size_t max_inflight_requests = context_.config().max_wr_per_qp;
+    std::shared_ptr<Task> task = nullptr;
     while (background_running_) {
         task_map_lock_.lock();
         if (!task && !pending_task_.empty()) {
@@ -197,22 +199,22 @@ void RdmaReliableProtocol::runBackgroundWorker() {
         }
         task_map_lock_.unlock();
         if (task && inflight_requests + task->request_list.size() <= max_inflight_requests) {
+            int ret = 0;
             if (task->type == SEND) {
-                int ret = task->endpoint->postSendRequest(task->request_list);
-                if (ret != (int)task->request_list.size()) {
-                    LOG(INFO) << "Unable to post request";
-                    for (size_t i = ret; i < task->request_list.size(); ++i)
-                        task->request_list[i]->status = FAILED;
-                }
+                ret = task->endpoint->postSendRequest(task->request_list);
             } else {
-                int ret =
-                    task->endpoint->postReceiveRequest(task->request_list);
-                if (ret != (int)task->request_list.size()) {
-                    LOG(INFO) << "Unable to post request";
-                    for (size_t i = ret; i < task->request_list.size(); ++i)
-                        task->request_list[i]->status = FAILED;
-                }
+                ret = task->endpoint->postReceiveRequest(task->request_list);
             }
+            if (ret < 0) {
+                for (size_t i = 0; i < task->request_list.size(); ++i)
+                    task->request_list[i]->status = FAILED;
+            } else {
+                // Request 0...ret-1 has been sent/received
+                for (size_t i = ret; i < task->request_list.size(); ++i)
+                    task->request_list[i]->status = FAILED;
+                inflight_requests += ret;
+            }
+            task = nullptr;
         }
 
         int ret = poll(SEND);
