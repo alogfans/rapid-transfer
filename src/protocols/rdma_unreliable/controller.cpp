@@ -1,0 +1,144 @@
+// Copyright 2024 Feng Ren
+
+#include "controller.h"
+
+#include <glog/logging.h>
+
+#include "protocols/common/rdma_ud_endpoint.h"
+
+namespace rapid {
+static std::string ToString(const std::vector<uint32_t> &list) {
+    std::ostringstream oss;
+    for (const auto &entry : list) oss << " " << entry;
+    return oss.str();
+}
+
+static std::vector<uint32_t> FromString(const std::string &str) {
+    std::istringstream iss(str);
+    std::vector<uint32_t> list;
+    uint32_t val;
+    while (iss >> val) list.push_back(val);
+    return list;
+}
+
+Controller::Controller() : endpoint_store_(context_), next_node_id_(0) {
+    // TBD
+}
+
+Controller::~Controller() { deconstruct(); }
+
+int Controller::construct(std::string local_addr,
+                          const std::string &device_name, uint8_t rdma_port,
+                          int gid_index) {
+    local_addr_ = local_addr;
+    int ret = context_.construct(device_name, rdma_port, gid_index);
+    if (ret) return ret;
+    ret = endpoint_store_.construct(
+        context_.cq(SEND_CQ), context_.cq(RECV_CQ),
+        context_.config().num_qp_per_endpoint, context_.config().max_sge_per_wr,
+        context_.config().max_wr_per_qp, context_.config().max_inline_bytes);
+    return ret;
+}
+
+int Controller::deconstruct() {
+    endpoint_store_.deconstruct();
+    context_.deconstruct();
+    return 0;
+}
+
+int Controller::registerMcastNode(const std::string &multicast_addr) {
+    if (multicast_context_map_.count(multicast_addr)) {
+        LOG(ERROR) << "Mcast address " << multicast_addr
+                   << " has been registered";
+        return -1;
+    }
+    auto context = std::make_shared<RdmaMulticastContext>();
+    if (context->construct(local_addr_, multicast_addr)) return -1;
+    multicast_context_map_[multicast_addr] = context;
+    return 0;
+}
+
+int Controller::unregisterMcastNode(const std::string &multicast_addr) {
+    if (!multicast_context_map_.count(multicast_addr)) {
+        LOG(ERROR) << "Mcast address " << multicast_addr << " not registered";
+        return -1;
+    }
+    auto context = multicast_context_map_[multicast_addr];
+    int ret = context->deconstruct();
+    multicast_context_map_.erase(multicast_addr);
+    return ret;
+}
+
+std::shared_ptr<RdmaMulticastContext> Controller::queryMcastNode(
+    const std::string &multicast_addr) {
+    if (!multicast_context_map_.count(multicast_addr)) return nullptr;
+    auto context = multicast_context_map_[multicast_addr];
+    return context;
+}
+
+int Controller::prepareConnection(const std::string &peer_addr,
+                                  Attributes &local) {
+    auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_addr);
+    if (!endpoint) return -1;
+    local["lid"] = std::to_string(context_.lid());
+    local["gid"] = context_.gid();
+    local["qp"] = ToString(endpoint->qpNum());
+    return 0;
+}
+
+int Controller::setupConnection(const std::string &peer_addr,
+                                const Attributes &peer) {
+    auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_addr);
+    if (!endpoint) return -1;
+    if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp"))
+        return -1;
+    auto lid = (uint16_t)std::stoi(peer.at("lid"));
+    auto gid = peer.at("gid");
+    auto qp_num_list = FromString(peer.at("qp"));
+    int ret = endpoint->setupConnection(gid, lid, qp_num_list);
+    if (ret) return ret;
+
+    ibv_gid gid_raw;
+    std::istringstream iss(gid);
+    for (int i = 0; i < 16; ++i) {
+        int value;
+        iss >> std::hex >> value;
+        gid_raw.raw[i] = static_cast<uint8_t>(value);
+        if (i < 15) iss.ignore(1, ':');
+    }
+    registerNode(peer_addr, gid_raw, qp_num_list);
+    return 0;
+}
+
+void Controller::registerNode(const std::string &peer_addr, ibv_gid &gid,
+                              const std::vector<uint32_t> &qp_num_list) {
+    RWSpinlock::WriteGuard guard(session_lock_);
+    auto node_id = next_node_id_.fetch_add(1);
+    for (auto qp_num : qp_num_list) {
+        NodeAddress p{gid, qp_num};
+        node_id_map_[p] = node_id;
+    }
+    peer_name_map_[peer_addr] = node_id;
+    peer_name_rev_map_[node_id] = peer_addr;
+}
+
+int Controller::find(ibv_gid &gid, uint32_t qp_num, uint8_t session) {
+    RWSpinlock::ReadGuard guard(session_lock_);
+    NodeAddress p{gid, qp_num};
+    if (node_id_map_.count(p)) return node_id_map_[p] * 256 + session;
+    return -1;
+}
+
+int Controller::findSession(const std::string &peer_addr) {
+    RWSpinlock::ReadGuard guard(session_lock_);
+    if (!peer_name_map_.count(peer_addr)) return -1;
+    return peer_name_map_[peer_addr] * 256 + 0;  // TODO randomly select session
+}
+
+std::shared_ptr<RdmaUDEndPoint> Controller::getOrCreateEndpoint(int session) {
+    RWSpinlock::ReadGuard guard(session_lock_);
+    if (!peer_name_rev_map_.count(session)) return nullptr;
+    return endpoint_store_.getOrCreateEndpoint(peer_name_rev_map_[session]);
+}
+
+}  // namespace rapid

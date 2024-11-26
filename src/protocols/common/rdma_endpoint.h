@@ -17,6 +17,7 @@ struct Request {
     void *addr[kMaxSgeCount] = {nullptr};
     size_t length[kMaxSgeCount] = {0};
     uint32_t lkey[kMaxSgeCount] = {0};
+    uint32_t imm_data = 0;
     volatile int *qp_depth = nullptr;
     volatile Status status = UNKNOWN;
 };

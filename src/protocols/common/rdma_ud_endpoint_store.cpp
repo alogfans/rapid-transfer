@@ -171,7 +171,8 @@ int RdmaUDEndPointStore::postSendRequest(
         auto &request = request_list[i];
         auto &wr = wr_list[i];
         wr.wr_id = (uint64_t)request;
-        wr.opcode = IBV_WR_SEND;
+        wr.opcode = request->imm_data ? IBV_WR_SEND_WITH_IMM : IBV_WR_SEND;
+        wr.imm_data = request->imm_data;
         wr.num_sge = actual_sge_count;
         wr.sg_list = &sge_list[i * kMaxSgeCount];
         wr.send_flags = IBV_SEND_SIGNALED;

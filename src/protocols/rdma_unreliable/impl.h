@@ -9,15 +9,10 @@
 #include "concurrency.h"
 #include "protocol.h"
 #include "protocols/common/rdma_context.h"
-#include "queue_entry.h"
-#include "session_id_manager.h"
+#include "context.h"
 
 namespace rapid {
-class PacketProcessor;
-
 struct RdmaUnreliableProtocol : public Protocol {
-    friend class PacketProcessor;
-
     RdmaUnreliableProtocol();
 
     virtual ~RdmaUnreliableProtocol();
@@ -50,20 +45,7 @@ struct RdmaUnreliableProtocol : public Protocol {
     virtual int unregisterLocalMemory(void *addr);
 
    private:
-    struct TaskInfo {
-        RequestType type;
-        std::unordered_map<std::string, uint32_t> next_sn;
-    };
-
-   private:
-    bool running_;
-    RdmaContext context_;
-    SessionIdManager session_id_manager_;
-    PacketProcessor *processors_;
-
-    RWSpinlock task_lock_;
-    std::unordered_map<TaskID, TaskInfo> task_info_;
-    std::atomic<TaskID> next_task_id_;
+    Context context_;
 };
 }  // namespace rapid
 
