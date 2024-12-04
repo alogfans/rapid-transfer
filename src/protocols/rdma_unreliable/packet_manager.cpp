@@ -227,11 +227,11 @@ int PacketBufferPool::freePacketDirect(void *addr) {
     return 0;
 }
 
-SendQueue::SendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size, 
-                     PacketBufferPool &pool)
+SendQueue::SendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
+                     PacketBufferPool &pool, uint8_t session)
     : mtu_size_(mtu_size),
       queue_capacity_(queue_capacity),
-      session_(0),
+      session_(session),
       head_(0),
       tail_(0),
       wnd_size_(wnd_size),
@@ -252,7 +252,7 @@ int SendQueue::markCompleted(uint32_t ack_sn) {
     std::lock_guard<std::mutex> lock(mutex_);
     while (tail_ != head_ && SHORT_SN(tail_) != SHORT_SN(ack_sn)) {
         auto &handle = handle_[tail_ % queue_capacity_];
-        pool_.freePacket(handle);
+        // pool_.freePacket(handle);
         tail_++;
     }
     return fillPrimaryQueue();
@@ -264,7 +264,7 @@ int SendQueue::fillPrimaryQueue() {
            head_ - tail_ <= wnd_size_) {
         auto slice = secondary_queue_.popFragment();
         auto &handle = handle_[head_ % queue_capacity_];
-        if (pool_.allocatePacket(handle)) return -1;
+        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return -1;
         handle.session = session_;
         handle.cmd = PKT_CMD_DATA;
         handle.wnd = wnd_size_;
@@ -291,9 +291,11 @@ int SendQueue::forEach(std::function<int(PacketHandle &)> func) {
     return 0;
 }
 
-ReceiveQueue::ReceiveQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size)
+ReceiveQueue::ReceiveQueue(size_t mtu_size, size_t queue_capacity,
+                           size_t wnd_size, uint8_t session)
     : mtu_size_(mtu_size),
       queue_capacity_(queue_capacity),
+      session_(session),
       head_(0),
       tail_(0),
       wnd_size_(wnd_size),
@@ -368,40 +370,39 @@ int PacketManager::deconstruct() {
     return pool_.deconstruct();
 }
 
-SendQueue &PacketManager::getSendQueue(int id) {
+SendQueue &PacketManager::getSendQueue(int sid) {
     queue_lock_.lockShared();
-    if (send_queue_.count(id)) {
-        auto &entry = send_queue_[id];
+    if (send_queue_.count(sid)) {
+        auto &entry = send_queue_[sid];
         queue_lock_.unlockShared();
         return *entry;
     }
     queue_lock_.unlockShared();
     queue_lock_.lock();
-    if (!send_queue_.count(id)) {
-        auto entry = new SendQueue(mtu_size_, queue_capacity_, wnd_size_, pool_);
-        entry->setSession(id % 256);
-        send_queue_[id] = entry;
+    if (!send_queue_.count(sid)) {
+        auto entry = new SendQueue(mtu_size_, queue_capacity_, wnd_size_, pool_,
+                                   sid % 256);
+        send_queue_[sid] = entry;
     }
-    auto &entry = send_queue_[id];
+    auto &entry = send_queue_[sid];
     queue_lock_.unlock();
     return *entry;
 }
 
-ReceiveQueue &PacketManager::getReceiveQueue(int id) {
+ReceiveQueue &PacketManager::getReceiveQueue(int sid) {
     queue_lock_.lockShared();
-    if (receive_queue_.count(id)) {
-        auto &entry = receive_queue_[id];
+    if (receive_queue_.count(sid)) {
+        auto &entry = receive_queue_[sid];
         queue_lock_.unlockShared();
         return *entry;
     }
     queue_lock_.unlockShared();
     queue_lock_.lock();
-    if (!receive_queue_.count(id)) {
-        auto entry = new ReceiveQueue(mtu_size_, queue_capacity_, wnd_size_);
-        entry->setSession(id % 256);
-        receive_queue_[id] = entry;
+    if (!receive_queue_.count(sid)) {
+        auto entry = new ReceiveQueue(mtu_size_, queue_capacity_, wnd_size_, sid % 256);
+        receive_queue_[sid] = entry;
     }
-    auto &entry = receive_queue_[id];
+    auto &entry = receive_queue_[sid];
     queue_lock_.unlock();
     return *entry;
 }

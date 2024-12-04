@@ -151,7 +151,8 @@ struct SecondaryQueue {
 
 class SendQueue {
    public:
-    SendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size, PacketBufferPool &pool);
+    SendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
+              PacketBufferPool &pool, uint8_t session);
 
     int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
 
@@ -171,14 +172,12 @@ class SendQueue {
 
     uint16_t getWndSize() const { return wnd_size_; }
 
-    void setSession(uint8_t session) { session_ = session; };
-
    private:
     int fillPrimaryQueue();
 
    private:
     const size_t mtu_size_, queue_capacity_;
-    uint8_t session_;
+    const uint8_t session_;
     std::atomic<uint64_t> head_, tail_;
     std::atomic<uint16_t> wnd_size_;
     std::vector<PacketHandle> handle_;
@@ -189,7 +188,7 @@ class SendQueue {
 
 class ReceiveQueue {
    public:
-    ReceiveQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size);
+    ReceiveQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size, uint8_t session);
 
     int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
 
@@ -207,8 +206,6 @@ class ReceiveQueue {
 
     uint16_t getWndSize() const { return wnd_size_; }
 
-    void setSession(uint8_t session) { session_ = session; };
-
    private:
     int fillPrimaryQueue();
 
@@ -219,13 +216,13 @@ class ReceiveQueue {
     };
 
     const size_t mtu_size_, queue_capacity_;
-    uint8_t session_;
+    const uint8_t session_;
     std::atomic<uint64_t> head_, tail_;
     std::atomic<uint16_t> wnd_size_;
     std::vector<Request> requests_;
     SecondaryQueue secondary_queue_;
-    PacketHandle ack_handle_;
     std::mutex mutex_;
+    PacketHandle ack_handle_;
 };
 
 class PacketManager {
@@ -251,9 +248,9 @@ class PacketManager {
 
     PacketBufferPool &getPool() { return pool_; }
 
-    SendQueue &getSendQueue(int id);
+    SendQueue &getSendQueue(int sid);
 
-    ReceiveQueue &getReceiveQueue(int id);
+    ReceiveQueue &getReceiveQueue(int sid);
 
     size_t mtuSize() const { return mtu_size_; }
 

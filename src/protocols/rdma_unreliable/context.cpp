@@ -69,12 +69,12 @@ int Context::runStep() {
     int ret = pollCompletedPackets(RECV_CQ, current_ts);
     if (ret < 0) return ret;
 
-    thread_local uint64_t snapshot_recv_cnt = 0;  
-    uint64_t recv_cnt = stats_.recv_data_packets.load(std::memory_order_relaxed);
-    if (snapshot_recv_cnt != recv_cnt) {
+    thread_local uint64_t snapshot_recv_data_packets = 0;
+    uint64_t recv_data_packets =
+        stats_.recv_data_packets.load(std::memory_order_relaxed);
+    if (snapshot_recv_data_packets != recv_data_packets) {
         ret = sendAckPackets(current_ts);
-        if (ret == 0)
-            snapshot_recv_cnt = recv_cnt;
+        if (ret == 0) snapshot_recv_data_packets = recv_data_packets;
     }
 
     ret = sendDataPackets(current_ts);
@@ -208,8 +208,8 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
 int Context::sendDataPackets(uint64_t current_ts) {
     auto &context = controller_.context();
     for (auto session : active_session_map_) {
-        packet_manager_.getSendQueue(session.first).forEach(
-            [&](PacketHandle &handle) -> int {
+        packet_manager_.getSendQueue(session.first)
+            .forEach([&](PacketHandle &handle) -> int {
                 if (current_ts - handle.ts < send_timeout_) return 0;
                 handle.ts = current_ts;
                 std::vector<Buffer> slices;
@@ -241,7 +241,8 @@ int Context::sendDataPackets(uint64_t current_ts) {
 
 int Context::sendAckPackets(uint64_t current_ts) {
     for (auto session : active_session_map_) {
-        uint32_t ack_sn = packet_manager_.getReceiveQueue(session.first).getAckSN();
+        uint32_t ack_sn =
+            packet_manager_.getReceiveQueue(session.first).getAckSN();
         PacketHandle &handle = session.second.ack_handle;
         if (handle.inflight) return -2;
         handle.session = uint8_t(session.first % 256);
@@ -249,6 +250,7 @@ int Context::sendAckPackets(uint64_t current_ts) {
         handle.wnd = uint16_t(recv_handles_.size());
         handle.sn = ack_sn;
         handle.ts = current_ts;
+        handle.inflight = true;
         std::vector<Buffer> slices;
         uint32_t imm_data;
         if (handle.serialize(slices, imm_data)) return -1;
@@ -263,7 +265,8 @@ int Context::sendAckPackets(uint64_t current_ts) {
             return -1;
         auto endpoint = controller_.getOrCreateEndpoint(session.first);
         if (!endpoint) return -1;
-        endpoint->postSendRequest({request});
+        int ret = endpoint->postSendRequest({request});
+        if (ret != 1) return -1;
     }
     return 0;
 }
@@ -271,9 +274,8 @@ int Context::sendAckPackets(uint64_t current_ts) {
 int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
     Request *request = (Request *)wc.wr_id;
     if (wc.opcode == IBV_WC_SEND) {
-        auto handle = (PacketHandle *) request->context;
-        if (handle && handle->cmd == PKT_CMD_ACK)
-            handle->inflight = false;
+        auto handle = (PacketHandle *)request->context;
+        if (handle && handle->cmd == PKT_CMD_ACK) handle->inflight = false;
         return 0;
     }
     if (wc.opcode == IBV_WC_RECV) {
