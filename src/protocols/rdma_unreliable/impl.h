@@ -46,6 +46,8 @@ struct RdmaUnreliableProtocol : public Protocol {
 
    private:
     Context context_;
+    std::atomic<bool> worker_running_;
+    std::thread worker_;
 };
 }  // namespace rapid
 

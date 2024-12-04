@@ -81,7 +81,7 @@ class Context {
     const static size_t kDefaultSendTimeout = 8000;  // 8us
     uint64_t send_timeout_;
 
-    uint16_t local_arena_lkey_;
+    uint32_t local_arena_lkey_;
     std::vector<PacketHandle> recv_handles_;
 };
 }  // namespace rapid

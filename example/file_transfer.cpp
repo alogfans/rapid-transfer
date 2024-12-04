@@ -23,7 +23,7 @@
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
 DEFINE_string(protocol, "rdma_reliable", "Transport protocol: rdma_reliable, rdma_unreliable");
 DEFINE_string(path, "", "Path of file to transfer");
-DEFINE_string(device, "mlx5_2", "RDMA device name to use");
+DEFINE_string(device, "mlx5_0", "RDMA device name to use");
 DEFINE_string(target, "optane21:12348", "Target hostname (and port, if needed)");
 DEFINE_string(listen, ":12348", "TCP listen address");
 DEFINE_uint32(rdma_port, 1, "RDMA port");

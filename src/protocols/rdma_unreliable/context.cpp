@@ -49,8 +49,7 @@ int Context::construct(std::string local_addr, const std::string &device_name,
         ret = submitNormalRecvWR(recv_handles_[i]);
         if (ret < 0) return ret;
     }
-
-    return ret;
+    return 0;
 }
 
 int Context::deconstruct() {
@@ -99,6 +98,7 @@ TaskID Context::send(const std::string &peer_name,
     if (ret) return ret;
     int task_id = next_task_id_.fetch_add(1);
     task_map_[task_id] = Task{session, last_sn, true};
+    LOG(INFO) << "send: " << session << " " << last_sn;
     return task_id;
 }
 
@@ -113,6 +113,7 @@ TaskID Context::receive(const std::string &peer_name,
     if (ret) return ret;
     int task_id = next_task_id_.fetch_add(1);
     task_map_[task_id] = Task{session, last_sn, false};
+    LOG(INFO) << "receiver: " << session << " " << last_sn;
     return task_id;
 }
 
@@ -121,10 +122,16 @@ Status Context::getStatus(TaskID task_id, size_t *transferred_bytes) {
     auto &task = task_map_[task_id];
     if (task.is_send) {
         auto &queue = packet_manager_.getSendQueue(task.session);
-        if (queue.getAckSN() >= task.last_sn) return Status::SUCCESS;
+        if (queue.getAckSN() >= task.last_sn) {
+            LOG(INFO) << "Done";
+            return Status::SUCCESS;
+        }
     } else {
         auto &queue = packet_manager_.getReceiveQueue(task.session);
-        if (queue.getAckSN() >= task.last_sn) return Status::SUCCESS;
+        if (queue.getAckSN() >= task.last_sn) {
+            LOG(INFO) << "Done";
+            return Status::SUCCESS;
+        }
     }
     return Status::PENDING;
 }
@@ -176,6 +183,7 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
                        << "+" << request->lkey[1]
                        << ", local_nic: " << controller_.context().deviceName()
                        << "): " << ibv_wc_status_str(wc[i].status);
+            abort(); // fuse
             continue;
         }
 
@@ -197,6 +205,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
             [&](PacketHandle &handle) -> int {
                 if (current_ts - handle.ts < send_timeout_) return 0;
                 handle.ts = current_ts;
+                LOG(INFO) << "Send DATA!" << handle.sn;
                 std::vector<Buffer> slices;
                 uint32_t imm_data;
                 if (handle.toBuffers(slices, imm_data)) return -1;
@@ -217,7 +226,9 @@ int Context::sendDataPackets(uint64_t current_ts) {
                     return -1;
                 auto endpoint = controller_.getOrCreateEndpoint(session);
                 if (!endpoint) return -1;
-                return endpoint->postSendRequest({request});
+                int rc = endpoint->postSendRequest({request});
+                LOG(INFO) << "send data! sn = " << handle.sn << " ret = " << rc;
+                return rc;
             });
     }
     return 0;
@@ -226,6 +237,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
 int Context::sendAckPackets(uint64_t current_ts) {
     for (auto session : active_session_set_) {
         uint32_t ack_sn = packet_manager_.getReceiveQueue(session).getAckSN();
+        // LOG(INFO) << "Send ACK!" << ack_sn;
         PacketHandle handle;
         int ret = packet_manager_.getPool().allocatePacket(handle);
         if (ret) return ret;
@@ -247,7 +259,7 @@ int Context::sendAckPackets(uint64_t current_ts) {
             return -1;
         auto endpoint = controller_.getOrCreateEndpoint(session);
         if (!endpoint) return -1;
-        return endpoint->postSendRequest({request});
+        endpoint->postSendRequest({request});
     }
     return 0;
 }
@@ -256,12 +268,13 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
     Request *request = (Request *)wc.wr_id;
     PacketHandle handle;
     if (wc.opcode == IBV_WC_SEND) {
-        int ret = handle.open((char *)request->addr[0]);
-        if (ret) return ret;
-        ret = handle.fromBuffer(wc.imm_data, wc.byte_len);
-        if (ret) return ret;
-        if (handle.cmd == PKT_CMD_ACK)
-            packet_manager_.getPool().freePacket(handle);
+        // int ret = handle.open((char *)request->addr[0]);
+        // if (ret) return ret;
+        // LOG(INFO) << "YYY " << wc.byte_len;
+        // ret = handle.fromBuffer(wc.imm_data, wc.byte_len);
+        // if (ret) return ret;
+        // if (handle.cmd == PKT_CMD_ACK)
+        //     packet_manager_.getPool().freePacket(handle);
         return 0;
     } else if (wc.opcode == IBV_WC_RECV) {
         int ret = handle.open((char *)request->addr[0], true);
@@ -272,8 +285,11 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
         int session = controller_.find(grh->sgid, wc.src_qp, handle.session);
         switch (handle.cmd) {
             case PKT_CMD_DATA:
+                LOG(INFO) << "Recv DATA: " << handle.sn;
                 packet_manager_.getReceiveQueue(session).markCompleted(handle);
+                break;
             case PKT_CMD_ACK: {
+                LOG(INFO) << "Recv ACK: " << handle.sn;
                 packet_manager_.getSendQueue(session).markCompleted(handle.sn);
                 // updateRTO(current_ts - packet.hdr.ts);
                 // timely_.update(current_ts - packet.hdr.ts, current_ts);

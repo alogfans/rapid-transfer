@@ -78,7 +78,7 @@ static inline std::string readString(int fd) {
 }
 
 static inline bool isValidPort(int port) {
-    return port >= 0 && port <= 65535;  // 检查端口是否在有效范围内
+    return port >= 0 && port <= 65535;
 }
 
 static inline int parseHostPort(const std::string &address,
@@ -225,19 +225,18 @@ void SessionManager::listener() {
                 continue;
             } else if (fd_list[i].revents & POLLIN) {
                 int conn_fd = fd_list[i].fd;
-                auto peer_name = getPeerName(conn_fd);
-                if (peer_name.empty()) {
-                    PLOG(ERROR) << "Unable to get peer name";
-                    close(conn_fd);
-                    fd_list.erase(fd_list.begin() + i);
-                    continue;
-                }
-
                 Attributes request, response;
                 int ret = readAttributes(conn_fd, request);
                 if (ret) {
                     PLOG_IF(ERROR, ret == -1)
                         << "Failed to read request attributes";
+                    close(conn_fd);
+                    fd_list.erase(fd_list.begin() + i);
+                    continue;
+                }
+                
+                auto peer_name = getPeerName(conn_fd);
+                if (peer_name.empty()) {
                     close(conn_fd);
                     fd_list.erase(fd_list.begin() + i);
                     continue;

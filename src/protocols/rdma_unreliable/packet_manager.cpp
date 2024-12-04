@@ -8,10 +8,12 @@ namespace rapid {
 PacketHandle::PacketHandle() : packet_buf(nullptr) {}
 
 int PacketHandle::open(void *packet_buf, bool with_grh) {
+    LOG(INFO) << "open " << this;
     auto &handle = *this;
     if (handle.packet_buf) {
-        LOG(ERROR) << "Unable to open handle: packet buf already specified";
-        return -1;
+        // LOG(ERROR) << "Unable to open handle: packet buf already specified";
+        // abort();
+        // return -1;
     }
     handle.packet_buf = packet_buf;
     handle.session = 0;
@@ -29,6 +31,7 @@ int PacketHandle::open(void *packet_buf, bool with_grh) {
 }
 
 int PacketHandle::close() {
+    LOG(INFO) << "close " << this;
     auto &handle = *this;
     handle.packet_buf = nullptr;
     handle.data_buf = nullptr;
@@ -72,12 +75,21 @@ void *PacketHandle::getData() {
 }
 
 int PacketHandle::fromBuffer(uint32_t imm_data, uint32_t packet_length) {
-    if (packet_length < sizeof(PktHdr)) {
-        LOG(ERROR) << "packet_length must be larger than header size";
-        return -1;
+    if (with_grh) {
+        if (packet_length < sizeof(PktHdr) + 40) {
+            LOG(ERROR) << "packet_length must be larger than header & GRH size";
+            return -1;
+        }
+        pkt_hdr_imm.raw = imm_data;
+        data_len = packet_length - sizeof(PktHdr) - 40;
+    } else {
+        if (packet_length < sizeof(PktHdr)) {
+            LOG(ERROR) << "packet_length must be larger than header size";
+            return -1;
+        }
+        pkt_hdr_imm.raw = imm_data;
+        data_len = packet_length - sizeof(PktHdr);
     }
-    pkt_hdr_imm.raw = imm_data;
-    data_len = packet_length - sizeof(PktHdr);
     return decode();
 }
 
@@ -237,23 +249,23 @@ SendQueue::SendQueue(size_t mtu_size, size_t queue_capacity,
       tail_(0),
       wnd_size_(queue_capacity),
       pool_(pool),
-      secondary_queue_(mtu_size - sizeof(PktHdr)) {
+      secondary_queue_(mtu_size - sizeof(PktHdr) - 40) {
     handle_.resize(queue_capacity);
 }
 
 int SendQueue::push(const std::vector<Buffer> &slice_list, uint32_t &last_sn) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto fragment_id = secondary_queue_.push(slice_list);
-    last_sn = SHORT_SN(fragment_id.second - 1);
+    last_sn = SHORT_SN(fragment_id.second);
     return fillPrimaryQueue();
 }
 
-int SendQueue::markCompleted(uint32_t sn) {
+int SendQueue::markCompleted(uint32_t ack_sn) {
     std::lock_guard<std::mutex> lock(mutex_);
-    handle_[sn % queue_capacity_].inflight = false;
     while (tail_ < head_) {
+        if (SHORT_SN(tail_) >= ack_sn) break;
         auto &handle = handle_[tail_ % queue_capacity_];
-        if (handle.inflight) break;
+        LOG(INFO) << "free " << tail_;
         pool_.freePacket(handle);
         tail_++;
     }
@@ -286,8 +298,8 @@ int SendQueue::getIndexRange(uint64_t &head, uint64_t &tail) {
 }
 
 int SendQueue::forEach(std::function<int(PacketHandle &)> func) {
-    while (tail_ < head_) {
-        auto &handle = handle_[tail_ % queue_capacity_];
+    for (auto curr = tail_.load(); curr != head_.load(); curr++) {
+        auto &handle = handle_[curr % queue_capacity_];
         func(handle);
     }
     return 0;
@@ -299,7 +311,7 @@ ReceiveQueue::ReceiveQueue(size_t mtu_size, size_t queue_capacity)
       head_(0),
       tail_(0),
       wnd_size_(queue_capacity),
-      secondary_queue_(mtu_size - sizeof(PktHdr)) {
+      secondary_queue_(mtu_size - sizeof(PktHdr) - 40) {
     requests_.resize(queue_capacity);
 }
 
@@ -307,7 +319,7 @@ int ReceiveQueue::push(const std::vector<Buffer> &slice_list,
                        uint32_t &last_sn) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto fragment_id = secondary_queue_.push(slice_list);
-    last_sn = SHORT_SN(fragment_id.second - 1);
+    last_sn = SHORT_SN(fragment_id.second);
     return fillPrimaryQueue();
 }
 
@@ -316,7 +328,7 @@ int ReceiveQueue::markCompleted(PacketHandle &handle) {
     auto &request = requests_[handle.sn % queue_capacity_];
     if (request.inflight) {
         if (handle.getDataLength() != request.length)
-            LOG(ERROR) << "Mismatch data length";
+            LOG(ERROR) << "Mismatch data length, " << handle.getDataLength() << " vs " << request.length;
         else
             memmove(request.addr, handle.getData(), request.length);
         request.inflight = false;
@@ -361,7 +373,9 @@ int PacketManager::construct() { return pool_.construct(); }
 
 int PacketManager::deconstruct() {
     for (auto &entry : send_queue_) delete entry.second;
+    send_queue_.clear();
     for (auto &entry : receive_queue_) delete entry.second;
+    receive_queue_.clear();
     return pool_.deconstruct();
 }
 

@@ -105,7 +105,7 @@ int RdmaUDEndPointStore::setupQueuePair(ibv_qp *qp) {
     attr.qp_state = IBV_QPS_INIT;
     attr.port_num = context_.portNum();
     attr.pkey_index = 0;
-    attr.qkey = 0xdeadbeef;
+    attr.qkey = 0;
     if (ibv_modify_qp(
             qp, &attr,
             IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_QKEY)) {
@@ -178,7 +178,7 @@ int RdmaUDEndPointStore::postSendRequest(
         wr.send_flags = IBV_SEND_SIGNALED;
         wr.next = (i + 1 == wr_count) ? nullptr : &wr_list[i + 1];
         wr.wr.ud.ah = ah;
-        wr.wr.ud.remote_qkey = 0xdeadbeef;
+        wr.wr.ud.remote_qkey = 0;
         wr.wr.ud.remote_qpn = remote_qpn;
         request->qp_depth = &send_wr_depth_list_[qp_index];
     }

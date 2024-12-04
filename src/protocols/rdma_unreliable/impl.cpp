@@ -37,10 +37,26 @@ RdmaUnreliableProtocol::~RdmaUnreliableProtocol() { deconstruct(); }
 
 int RdmaUnreliableProtocol::construct(const std::string &device_name,
                                       uint8_t rdma_port, int gid_index) {
-    return context_.construct(getSocketAddress(device_name), device_name, rdma_port, gid_index);
+    int ret = context_.construct(getSocketAddress(device_name), device_name, rdma_port, gid_index);
+    if (ret)
+        return ret;
+    worker_running_ = true;
+    worker_ = std::thread([this](){
+        while (worker_running_) {
+            int rc = context_.runStep();
+            if (rc) return rc;
+        }
+        return 0;
+    });
+    return 0;
 }
 
-int RdmaUnreliableProtocol::deconstruct() { return context_.deconstruct(); }
+int RdmaUnreliableProtocol::deconstruct() {
+    if (worker_running_.exchange(false)) {
+        worker_.join();
+    }
+    return context_.deconstruct(); 
+}
 
 int RdmaUnreliableProtocol::prepareConnection(const std::string &peer_name,
                                               Attributes &local) {

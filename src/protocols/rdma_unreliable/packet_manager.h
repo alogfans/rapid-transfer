@@ -158,7 +158,7 @@ class SendQueue {
 
     int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
 
-    int markCompleted(uint32_t sn);
+    int markCompleted(uint32_t ack_sn);
 
     uint32_t getNextSN() const { return SHORT_SN(head_); }
 
@@ -234,7 +234,7 @@ class PacketManager {
    public:
     const static size_t kDefaultMTUSize = 1024;
     const static size_t kMaxPackets = 102400;
-    const static size_t kQueueCapacity = 4096;
+    const static size_t kQueueCapacity = 409600;
 
     PacketManager(size_t mtu_size = kDefaultMTUSize,
                   size_t max_packets = kMaxPackets,

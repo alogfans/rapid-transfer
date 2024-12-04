@@ -22,7 +22,7 @@
 
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
 DEFINE_string(protocol, "rdma_reliable", "Transport protocol: rdma_reliable, rdma_unreliable");
-DEFINE_string(device, "mlx5_3", "RDMA device name to use");
+DEFINE_string(device, "mlx5_0", "RDMA device name to use");
 DEFINE_string(target_hostname, "optane21", "Target hostname (and port, if needed)");
 DEFINE_uint32(first_port, 12345, "First TCP port for connecting");
 DEFINE_uint32(threads, 8, "Number of concurrent threads");
