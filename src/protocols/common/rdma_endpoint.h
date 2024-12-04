@@ -20,6 +20,7 @@ struct Request {
     uint32_t imm_data = 0;
     volatile int *qp_depth = nullptr;
     volatile Status status = UNKNOWN;
+    void *context = nullptr;
 };
 
 struct RdmaEndPoint {

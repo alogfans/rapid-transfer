@@ -122,17 +122,17 @@ void Controller::registerNode(const std::string &peer_addr, ibv_gid &gid,
     peer_name_rev_map_[node_id] = peer_addr;
 }
 
-int Controller::find(ibv_gid &gid, uint32_t qp_num, uint8_t session) {
+int Controller::findSession(ibv_gid &gid, uint32_t qp_num, uint8_t session) {
     RWSpinlock::ReadGuard guard(session_lock_);
     NodeAddress p{gid, qp_num};
     if (node_id_map_.count(p)) return node_id_map_[p] * 256 + session;
     return -1;
 }
 
-int Controller::findSession(const std::string &peer_addr) {
+int Controller::findSession(const std::string &peer_addr, uint8_t session) {
     RWSpinlock::ReadGuard guard(session_lock_);
     if (!peer_name_map_.count(peer_addr)) return -1;
-    return peer_name_map_[peer_addr] * 256 + 0;  // TODO randomly select session
+    return peer_name_map_[peer_addr] * 256 + session;
 }
 
 std::shared_ptr<RdmaUDEndPoint> Controller::getOrCreateEndpoint(int session) {

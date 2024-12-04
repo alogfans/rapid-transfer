@@ -72,17 +72,27 @@ class Context {
 
     std::unordered_map<TaskID, Task> task_map_;
     std::atomic<TaskID> next_task_id_;
-
-    std::unordered_set<int> active_session_set_;
-
-    const static size_t kWindowSize = 128;
-    size_t send_wnd_, recv_wnd_;
+    
+    struct SessionInfo {
+        PacketHandle ack_handle;
+    };
+    std::unordered_map<int, SessionInfo> active_session_map_;
 
     const static size_t kDefaultSendTimeout = 8000;  // 8us
     uint64_t send_timeout_;
-
     uint32_t local_arena_lkey_;
+
+    const static size_t kNumReceiveHandles = 128;
     std::vector<PacketHandle> recv_handles_;
+
+    struct Stats {
+        Stats() : send_data_packets(0), recv_data_packets(0) {}
+
+        std::atomic<uint64_t> send_data_packets;
+        std::atomic<uint64_t> recv_data_packets;
+    };
+
+    Stats stats_;
 };
 }  // namespace rapid
 

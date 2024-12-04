@@ -63,9 +63,9 @@ class Controller {
 
     int setupConnection(const std::string &peer_addr, const Attributes &peer);
 
-    int find(ibv_gid &gid, uint32_t qp_num, uint8_t session);
+    int findSession(ibv_gid &gid, uint32_t qp_num, uint8_t session);
 
-    int findSession(const std::string &peer_addr);
+    int findSession(const std::string &peer_addr, uint8_t session);
 
     std::shared_ptr<RdmaUDEndPoint> getOrCreateEndpoint(int session);
 

@@ -11,17 +11,11 @@ static inline uint64_t GetCurrentTS() {
     return (tv_now.tv_sec * 1000000 + tv_now.tv_usec);
 }
 
-Context::Context()
-    : next_task_id_(0),
-      send_wnd_(kWindowSize),
-      recv_wnd_(kWindowSize),
-      send_timeout_(kDefaultSendTimeout) {}
+Context::Context() : next_task_id_(0), send_timeout_(kDefaultSendTimeout) {}
 
 Context::Context(size_t mtu_size, size_t max_packets, size_t queue_capacity)
     : packet_manager_(mtu_size, max_packets, queue_capacity),
       next_task_id_(0),
-      send_wnd_(kWindowSize),
-      recv_wnd_(kWindowSize),
       send_timeout_(kDefaultSendTimeout) {}
 
 Context::~Context() {}
@@ -42,8 +36,8 @@ int Context::construct(std::string local_addr, const std::string &device_name,
     if (ret) return ret;
     local_arena_lkey_ = controller_.context().key(arena_base).first;
 
-    recv_handles_.resize(recv_wnd_);
-    for (uint32_t i = 0; i < recv_wnd_; ++i) {
+    recv_handles_.resize(kNumReceiveHandles);
+    for (size_t i = 0; i < recv_handles_.size(); ++i) {
         ret = pool.allocatePacket(recv_handles_[i], true);
         if (ret < 0) return ret;
         ret = submitNormalRecvWR(recv_handles_[i]);
@@ -53,6 +47,7 @@ int Context::construct(std::string local_addr, const std::string &device_name,
 }
 
 int Context::deconstruct() {
+    active_session_map_.clear();
     controller_.context().unregisterMemoryRegion(
         packet_manager_.getPool().getArena());
     packet_manager_.deconstruct();
@@ -74,46 +69,60 @@ int Context::runStep() {
     int ret = pollCompletedPackets(RECV_CQ, current_ts);
     if (ret < 0) return ret;
 
-    if (ret > 0) {
+    thread_local uint64_t snapshot_recv_cnt = 0;  
+    uint64_t recv_cnt = stats_.recv_data_packets.load(std::memory_order_relaxed);
+    if (snapshot_recv_cnt != recv_cnt) {
         ret = sendAckPackets(current_ts);
-        if (ret) return ret;
+        if (ret == 0)
+            snapshot_recv_cnt = recv_cnt;
     }
-
-    ret = pollCompletedPackets(SEND_CQ, current_ts);
-    if (ret < 0) return ret;
 
     ret = sendDataPackets(current_ts);
     if (ret) return ret;
 
+    ret = pollCompletedPackets(SEND_CQ, current_ts);
+    if (ret < 0) return ret;
     return 0;
 }
 
 TaskID Context::send(const std::string &peer_name,
                      const std::vector<Buffer> &buffer_list, bool multicast) {
-    int session = controller_.findSession(peer_name);
-    active_session_set_.insert(session);
-    if (session < 0) return session;
+    int session = controller_.findSession(peer_name, 0);
+    if (session < 0) {
+        LOG(ERROR) << "cannot assign session id";
+        return -1;
+    }
+    if (!active_session_map_.count(session)) {
+        int ret = packet_manager_.getPool().allocatePacket(
+            active_session_map_[session].ack_handle);
+        if (ret) return ret;
+    }
     uint32_t last_sn;
     int ret = packet_manager_.getSendQueue(session).push(buffer_list, last_sn);
     if (ret) return ret;
     int task_id = next_task_id_.fetch_add(1);
     task_map_[task_id] = Task{session, last_sn, true};
-    LOG(INFO) << "send: " << session << " " << last_sn;
     return task_id;
 }
 
 TaskID Context::receive(const std::string &peer_name,
                         const std::vector<Buffer> &buffer_list) {
-    int session = controller_.findSession(peer_name);
-    active_session_set_.insert(session);
-    if (session < 0) return session;
+    int session = controller_.findSession(peer_name, 0);
+    if (session < 0) {
+        LOG(ERROR) << "cannot assign session id";
+        return -1;
+    }
+    if (!active_session_map_.count(session)) {
+        int ret = packet_manager_.getPool().allocatePacket(
+            active_session_map_[session].ack_handle);
+        if (ret) return ret;
+    }
     uint32_t last_sn;
     int ret =
         packet_manager_.getReceiveQueue(session).push(buffer_list, last_sn);
     if (ret) return ret;
     int task_id = next_task_id_.fetch_add(1);
     task_map_[task_id] = Task{session, last_sn, false};
-    LOG(INFO) << "receiver: " << session << " " << last_sn;
     return task_id;
 }
 
@@ -123,13 +132,11 @@ Status Context::getStatus(TaskID task_id, size_t *transferred_bytes) {
     if (task.is_send) {
         auto &queue = packet_manager_.getSendQueue(task.session);
         if (queue.getAckSN() >= task.last_sn) {
-            LOG(INFO) << "Done";
             return Status::SUCCESS;
         }
     } else {
         auto &queue = packet_manager_.getReceiveQueue(task.session);
         if (queue.getAckSN() >= task.last_sn) {
-            LOG(INFO) << "Done";
             return Status::SUCCESS;
         }
     }
@@ -183,7 +190,7 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
                        << "+" << request->lkey[1]
                        << ", local_nic: " << controller_.context().deviceName()
                        << "): " << ibv_wc_status_str(wc[i].status);
-            abort(); // fuse
+            abort();  // fuse
             continue;
         }
 
@@ -200,15 +207,14 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
 
 int Context::sendDataPackets(uint64_t current_ts) {
     auto &context = controller_.context();
-    for (auto session : active_session_set_) {
-        packet_manager_.getSendQueue(session).forEach(
+    for (auto session : active_session_map_) {
+        packet_manager_.getSendQueue(session.first).forEach(
             [&](PacketHandle &handle) -> int {
                 if (current_ts - handle.ts < send_timeout_) return 0;
                 handle.ts = current_ts;
-                LOG(INFO) << "Send DATA!" << handle.sn;
                 std::vector<Buffer> slices;
                 uint32_t imm_data;
-                if (handle.toBuffers(slices, imm_data)) return -1;
+                if (handle.serialize(slices, imm_data)) return -1;
                 Request *request = nullptr;
                 if (slices.size() == 1)
                     request = new Request{.addr = {slices[0].addr},
@@ -224,10 +230,9 @@ int Context::sendDataPackets(uint64_t current_ts) {
                         .imm_data = imm_data};
                 else
                     return -1;
-                auto endpoint = controller_.getOrCreateEndpoint(session);
+                auto endpoint = controller_.getOrCreateEndpoint(session.first);
                 if (!endpoint) return -1;
                 int rc = endpoint->postSendRequest({request});
-                LOG(INFO) << "send data! sn = " << handle.sn << " ret = " << rc;
                 return rc;
             });
     }
@@ -235,29 +240,28 @@ int Context::sendDataPackets(uint64_t current_ts) {
 }
 
 int Context::sendAckPackets(uint64_t current_ts) {
-    for (auto session : active_session_set_) {
-        uint32_t ack_sn = packet_manager_.getReceiveQueue(session).getAckSN();
-        // LOG(INFO) << "Send ACK!" << ack_sn;
-        PacketHandle handle;
-        int ret = packet_manager_.getPool().allocatePacket(handle);
-        if (ret) return ret;
-        handle.session = uint8_t(session % 256);
+    for (auto session : active_session_map_) {
+        uint32_t ack_sn = packet_manager_.getReceiveQueue(session.first).getAckSN();
+        PacketHandle &handle = session.second.ack_handle;
+        if (handle.inflight) return -2;
+        handle.session = uint8_t(session.first % 256);
         handle.cmd = PKT_CMD_ACK;
-        handle.wnd = recv_wnd_;
+        handle.wnd = uint16_t(recv_handles_.size());
         handle.sn = ack_sn;
-        handle.ts = 0;
+        handle.ts = current_ts;
         std::vector<Buffer> slices;
         uint32_t imm_data;
-        if (handle.toBuffers(slices, imm_data)) return -1;
+        if (handle.serialize(slices, imm_data)) return -1;
         Request *request = nullptr;
         if (slices.size() == 1)
             request = new Request{.addr = {slices[0].addr},
                                   .length = {slices[0].length},
                                   .lkey = {local_arena_lkey_},
-                                  .imm_data = imm_data};
+                                  .imm_data = imm_data,
+                                  .context = &handle};
         else
             return -1;
-        auto endpoint = controller_.getOrCreateEndpoint(session);
+        auto endpoint = controller_.getOrCreateEndpoint(session.first);
         if (!endpoint) return -1;
         endpoint->postSendRequest({request});
     }
@@ -266,30 +270,32 @@ int Context::sendAckPackets(uint64_t current_ts) {
 
 int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
     Request *request = (Request *)wc.wr_id;
-    PacketHandle handle;
     if (wc.opcode == IBV_WC_SEND) {
-        // int ret = handle.open((char *)request->addr[0]);
-        // if (ret) return ret;
-        // LOG(INFO) << "YYY " << wc.byte_len;
-        // ret = handle.fromBuffer(wc.imm_data, wc.byte_len);
-        // if (ret) return ret;
-        // if (handle.cmd == PKT_CMD_ACK)
-        //     packet_manager_.getPool().freePacket(handle);
+        auto handle = (PacketHandle *) request->context;
+        if (handle && handle->cmd == PKT_CMD_ACK)
+            handle->inflight = false;
         return 0;
-    } else if (wc.opcode == IBV_WC_RECV) {
-        int ret = handle.open((char *)request->addr[0], true);
+    }
+    if (wc.opcode == IBV_WC_RECV) {
+        PacketHandle handle;
+        int ret = handle.setRawPacket((char *)request->addr[0], true);
         if (ret) return ret;
-        ret = handle.fromBuffer(wc.imm_data, wc.byte_len);
+        ret = handle.deserialize(wc.imm_data, wc.byte_len);
         if (ret) return ret;
         ibv_grh *grh = (ibv_grh *)request->addr[0];
-        int session = controller_.find(grh->sgid, wc.src_qp, handle.session);
+        int session =
+            controller_.findSession(grh->sgid, wc.src_qp, handle.session);
+        if (session < 0) {
+            LOG(ERROR) << "cannot assign session id";
+            return -1;
+        }
         switch (handle.cmd) {
             case PKT_CMD_DATA:
-                LOG(INFO) << "Recv DATA: " << handle.sn;
                 packet_manager_.getReceiveQueue(session).markCompleted(handle);
+                stats_.recv_data_packets.fetch_add(1,
+                                                   std::memory_order_relaxed);
                 break;
             case PKT_CMD_ACK: {
-                LOG(INFO) << "Recv ACK: " << handle.sn;
                 packet_manager_.getSendQueue(session).markCompleted(handle.sn);
                 // updateRTO(current_ts - packet.hdr.ts);
                 // timely_.update(current_ts - packet.hdr.ts, current_ts);
@@ -300,8 +306,8 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
                 break;
         }
         return submitNormalRecvWR(handle);
-    } else
-        return -1;
+    }
+    return 0;
 }
 
 // void Context::updateRTO(uint64_t rtt) {

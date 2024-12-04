@@ -17,7 +17,6 @@
 #include <stack>
 
 #include "protocols/common/rdma_context.h"
-
 #include "rapid_transfer.h"
 
 #define PKT_CMD_DATA (0)
@@ -48,21 +47,19 @@ class PacketHandle {
 
     PacketHandle();
 
-    int open(void *packet_buf, bool with_grh = false);
-
-    int close();
-
-    int setData(void *data, size_t length, bool do_copy = false);
-
-    void *getData();
-
-    uint32_t getDataLength() { return data_len; }
+    int setRawPacket(void *packet_buf, bool with_grh = false);
 
     void *getRawPacket() { return packet_buf; }
 
-    int fromBuffer(uint32_t imm_data, uint32_t packet_length);
+    int setPayload(void *data, size_t length, bool do_copy = false);
 
-    int toBuffers(std::vector<Buffer> &slices, uint32_t &imm_data);
+    void *getPayload();
+
+    uint32_t getPayloadLength() { return data_len; }
+
+    int deserialize(uint32_t imm_data, uint32_t packet_length);
+
+    int serialize(std::vector<Buffer> &slices, uint32_t &imm_data);
 
    public:
     uint8_t session;
@@ -154,7 +151,7 @@ struct SecondaryQueue {
 
 class SendQueue {
    public:
-    SendQueue(size_t mtu_size, size_t queue_capacity, PacketBufferPool &pool);
+    SendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size, PacketBufferPool &pool);
 
     int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
 
@@ -192,7 +189,7 @@ class SendQueue {
 
 class ReceiveQueue {
    public:
-    ReceiveQueue(size_t mtu_size, size_t queue_capacity);
+    ReceiveQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size);
 
     int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
 
@@ -227,18 +224,21 @@ class ReceiveQueue {
     std::atomic<uint16_t> wnd_size_;
     std::vector<Request> requests_;
     SecondaryQueue secondary_queue_;
+    PacketHandle ack_handle_;
     std::mutex mutex_;
 };
 
 class PacketManager {
    public:
-    const static size_t kDefaultMTUSize = 1024;
+    const static size_t kDefaultMTUSize = 4096;
     const static size_t kMaxPackets = 102400;
-    const static size_t kQueueCapacity = 409600;
+    const static size_t kQueueCapacity = 4096;
+    const static size_t kWndSize = 256;
 
     PacketManager(size_t mtu_size = kDefaultMTUSize,
                   size_t max_packets = kMaxPackets,
-                  size_t queue_capacity = kQueueCapacity);
+                  size_t queue_capacity = kQueueCapacity,
+                  size_t wnd_size = kWndSize);
 
     ~PacketManager();
 
@@ -258,7 +258,7 @@ class PacketManager {
     size_t mtuSize() const { return mtu_size_; }
 
    private:
-    const size_t mtu_size_, max_packets_, queue_capacity_;
+    const size_t mtu_size_, max_packets_, queue_capacity_, wnd_size_;
     RWSpinlock queue_lock_;
     PacketBufferPool pool_;
     std::unordered_map<int, SendQueue *> send_queue_;
