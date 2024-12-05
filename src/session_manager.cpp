@@ -175,7 +175,7 @@ static std::string getPeerName(int fd) {
         PLOG(ERROR) << "Failed to convert peer name to string";
         return "";
     }
-    return std::string(host_buf) + ":" + std::string(port_buf);
+    return std::string(host_buf) + ":" + std::string(port_buf) + "/" + std::to_string(fd);
 }
 
 void SessionManager::listener() {
@@ -208,9 +208,9 @@ void SessionManager::listener() {
                 close(conn_fd);
                 continue;
             }
-
             pollfd conn_pollfd = {conn_fd, POLLIN, 0};
             fd_list.push_back(conn_pollfd);
+            continue;
         }
 
         for (size_t i = 1; i < fd_list.size(); ++i) {

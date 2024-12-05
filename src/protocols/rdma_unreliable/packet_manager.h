@@ -102,12 +102,10 @@ class PacketBufferPool {
 
     int freePacket(PacketHandle &handle);
 
-    int freePacketDirect(void *addr);
-
    private:
     const size_t mtu_size_, max_packets_;
-    RWSpinlock arena_lock_;
     void *arena_, *global_free_buffer_;
+    RWSpinlock arena_lock_;
 };
 
 struct SecondaryQueue {
@@ -154,6 +152,8 @@ class SendQueue {
     SendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
               PacketBufferPool &pool, uint8_t session);
 
+    ~SendQueue();
+
     int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
 
     int markCompleted(uint32_t ack_sn);
@@ -183,12 +183,13 @@ class SendQueue {
     std::vector<PacketHandle> handle_;
     PacketBufferPool &pool_;
     SecondaryQueue secondary_queue_;
-    std::mutex mutex_;
+    RWSpinlock queue_lock_;
 };
 
 class ReceiveQueue {
    public:
-    ReceiveQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size, uint8_t session);
+    ReceiveQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
+                 uint8_t session);
 
     int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
 
@@ -221,8 +222,7 @@ class ReceiveQueue {
     std::atomic<uint16_t> wnd_size_;
     std::vector<Request> requests_;
     SecondaryQueue secondary_queue_;
-    std::mutex mutex_;
-    PacketHandle ack_handle_;
+    RWSpinlock queue_lock_;
 };
 
 class PacketManager {

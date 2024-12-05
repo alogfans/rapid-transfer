@@ -2,7 +2,14 @@
 
 #include "controller.h"
 
+#include <arpa/inet.h>
 #include <glog/logging.h>
+#include <net/if.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 
 #include "protocols/common/rdma_ud_endpoint.h"
 
@@ -21,16 +28,33 @@ static std::vector<uint32_t> FromString(const std::string &str) {
     return list;
 }
 
-Controller::Controller() : endpoint_store_(context_), next_node_id_(0) {
-    // TBD
+static std::string getSocketAddress(const std::string &device_name) {
+    struct ifreq ifr;
+    struct sockaddr_in *sin;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd == -1) {
+        PLOG(ERROR) << "socket failed";
+        return "";
+    }
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, device_name.c_str(), IFNAMSIZ - 1);
+    if (ioctl(fd, SIOCGIFADDR, &ifr) < 0) {
+        PLOG(ERROR) << "ioctl failed";
+        close(fd);
+        return "";
+    }
+    close(fd);
+    sin = (struct sockaddr_in *)&ifr.ifr_addr;
+    return std::string(inet_ntoa(sin->sin_addr));
 }
+
+Controller::Controller() : endpoint_store_(context_), next_node_id_(0) {}
 
 Controller::~Controller() { deconstruct(); }
 
-int Controller::construct(std::string local_addr,
-                          const std::string &device_name, uint8_t rdma_port,
+int Controller::construct(const std::string &device_name, uint8_t rdma_port,
                           int gid_index) {
-    local_addr_ = local_addr;
+    local_addr_ = getSocketAddress(device_name);
     int ret = context_.construct(device_name, rdma_port, gid_index);
     if (ret) return ret;
     ret = endpoint_store_.construct(
@@ -48,8 +72,7 @@ int Controller::deconstruct() {
 
 int Controller::registerMcastNode(const std::string &multicast_addr) {
     if (multicast_context_map_.count(multicast_addr)) {
-        LOG(ERROR) << "Mcast address " << multicast_addr
-                   << " has been registered";
+        LOG(ERROR) << "multicast address " << multicast_addr << " registered";
         return -1;
     }
     auto context = std::make_shared<RdmaMulticastContext>();
@@ -60,7 +83,8 @@ int Controller::registerMcastNode(const std::string &multicast_addr) {
 
 int Controller::unregisterMcastNode(const std::string &multicast_addr) {
     if (!multicast_context_map_.count(multicast_addr)) {
-        LOG(ERROR) << "Mcast address " << multicast_addr << " not registered";
+        LOG(ERROR) << "multicast address " << multicast_addr
+                   << " not registered";
         return -1;
     }
     auto context = multicast_context_map_[multicast_addr];
@@ -90,8 +114,10 @@ int Controller::setupConnection(const std::string &peer_addr,
                                 const Attributes &peer) {
     auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_addr);
     if (!endpoint) return -1;
-    if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp"))
+    if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp")) {
+        LOG(ERROR) << "invalid peer attributes";
         return -1;
+    }
     auto lid = (uint16_t)std::stoi(peer.at("lid"));
     auto gid = peer.at("gid");
     auto qp_num_list = FromString(peer.at("qp"));
@@ -137,8 +163,9 @@ int Controller::findSession(const std::string &peer_addr, uint8_t session) {
 
 std::shared_ptr<RdmaUDEndPoint> Controller::getOrCreateEndpoint(int session) {
     RWSpinlock::ReadGuard guard(session_lock_);
-    if (!peer_name_rev_map_.count(session)) return nullptr;
-    return endpoint_store_.getOrCreateEndpoint(peer_name_rev_map_[session]);
+    auto node_id = session / 256;
+    if (!peer_name_rev_map_.count(node_id)) return nullptr;
+    return endpoint_store_.getOrCreateEndpoint(peer_name_rev_map_[node_id]);
 }
 
 }  // namespace rapid

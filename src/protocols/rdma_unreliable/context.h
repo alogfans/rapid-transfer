@@ -19,8 +19,8 @@ class Context {
 
     ~Context();
 
-    int construct(std::string local_addr, const std::string &device_name,
-                  uint8_t rdma_port, int gid_index);
+    int construct(const std::string &device_name, uint8_t rdma_port,
+                  int gid_index);
 
     int deconstruct();
 
@@ -35,6 +35,8 @@ class Context {
                    const std::vector<Buffer> &buffer_list);
 
     Status getStatus(TaskID task_id, size_t *transferred_bytes);
+
+    int freeTask(TaskID task_id);
 
     int prepareConnection(const std::string &peer_addr, Attributes &local);
 
@@ -72,7 +74,7 @@ class Context {
 
     std::unordered_map<TaskID, Task> task_map_;
     std::atomic<TaskID> next_task_id_;
-    
+
     struct SessionInfo {
         PacketHandle ack_handle;
     };

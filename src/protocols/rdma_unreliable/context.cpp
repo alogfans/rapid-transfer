@@ -20,10 +20,10 @@ Context::Context(size_t mtu_size, size_t max_packets, size_t queue_capacity)
 
 Context::~Context() {}
 
-int Context::construct(std::string local_addr, const std::string &device_name,
-                       uint8_t rdma_port, int gid_index) {
+int Context::construct(const std::string &device_name, uint8_t rdma_port,
+                       int gid_index) {
     int ret = 0;
-    ret = controller_.construct(local_addr, device_name, rdma_port, gid_index);
+    ret = controller_.construct(device_name, rdma_port, gid_index);
     if (ret < 0) return ret;
     ret = packet_manager_.construct();
     if (ret < 0) return ret;
@@ -143,6 +143,12 @@ Status Context::getStatus(TaskID task_id, size_t *transferred_bytes) {
     return Status::PENDING;
 }
 
+int Context::freeTask(TaskID task_id) {
+    if (!task_map_.count(task_id)) return -1;
+    task_map_.erase(task_id);
+    return 0;
+}
+
 int Context::prepareConnection(const std::string &peer_addr,
                                Attributes &local) {
     return controller_.prepareConnection(peer_addr, local);
@@ -175,7 +181,7 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
     ibv_wc wc[kPollCount];
     int nr_poll = controller_.context().poll(kPollCount, wc, cq_index);
     if (nr_poll < 0) {
-        LOG(ERROR) << "Worker: Failed to poll completion queues";
+        LOG(ERROR) << "worker: failed to poll completion queues";
         return -1;
     }
 
@@ -183,7 +189,7 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
         auto request = (Request *)wc[i].wr_id;
         __sync_fetch_and_sub(request->qp_depth, 1);
         if (wc[i].status != IBV_WC_SUCCESS) {
-            LOG(ERROR) << "Worker: Process failed for slice (addr: "
+            LOG(ERROR) << "worker: process failed for slice (addr: "
                        << request->addr[0] << "+" << request->addr[1]
                        << ", length: " << request->length[0] << "+"
                        << request->length[1] << ", lkey: " << request->lkey[0]
@@ -241,14 +247,13 @@ int Context::sendDataPackets(uint64_t current_ts) {
 
 int Context::sendAckPackets(uint64_t current_ts) {
     for (auto session : active_session_map_) {
-        uint32_t ack_sn =
-            packet_manager_.getReceiveQueue(session.first).getAckSN();
+        auto &queue = packet_manager_.getReceiveQueue(session.first);
         PacketHandle &handle = session.second.ack_handle;
         if (handle.inflight) return -2;
         handle.session = uint8_t(session.first % 256);
         handle.cmd = PKT_CMD_ACK;
-        handle.wnd = uint16_t(recv_handles_.size());
-        handle.sn = ack_sn;
+        handle.wnd = queue.getWndSize();
+        handle.sn = queue.getAckSN();
         handle.ts = current_ts;
         handle.inflight = true;
         std::vector<Buffer> slices;
@@ -287,25 +292,23 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
         ibv_grh *grh = (ibv_grh *)request->addr[0];
         int session =
             controller_.findSession(grh->sgid, wc.src_qp, handle.session);
-        if (session < 0) {
-            LOG(ERROR) << "cannot assign session id";
-            return -1;
-        }
-        switch (handle.cmd) {
-            case PKT_CMD_DATA:
-                packet_manager_.getReceiveQueue(session).markCompleted(handle);
-                stats_.recv_data_packets.fetch_add(1,
-                                                   std::memory_order_relaxed);
-                break;
-            case PKT_CMD_ACK: {
-                packet_manager_.getSendQueue(session).markCompleted(handle.sn);
-                // updateRTO(current_ts - packet.hdr.ts);
-                // timely_.update(current_ts - packet.hdr.ts, current_ts);
-                break;
+        if (session >= 0) {
+            switch (handle.cmd) {
+                case PKT_CMD_DATA:
+                    packet_manager_.getReceiveQueue(session).markCompleted(handle);
+                    stats_.recv_data_packets.fetch_add(1,
+                                                    std::memory_order_relaxed);
+                    break;
+                case PKT_CMD_ACK: {
+                    packet_manager_.getSendQueue(session).markCompleted(handle.sn);
+                    // updateRTO(current_ts - packet.hdr.ts);
+                    // timely_.update(current_ts - packet.hdr.ts, current_ts);
+                    break;
+                }
+                default:
+                    LOG(INFO) << "Unknown packet";
+                    break;
             }
-            default:
-                LOG(INFO) << "Unknown packet";
-                break;
         }
         return submitNormalRecvWR(handle);
     }

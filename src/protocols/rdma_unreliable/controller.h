@@ -47,8 +47,8 @@ class Controller {
     Controller(const Controller &) = delete;
     Controller &operator=(const Controller &) = delete;
 
-    int construct(std::string local_addr, const std::string &device_name,
-                  uint8_t rdma_port, int gid_index);
+    int construct(const std::string &device_name, uint8_t rdma_port,
+                  int gid_index);
 
     int deconstruct();
 

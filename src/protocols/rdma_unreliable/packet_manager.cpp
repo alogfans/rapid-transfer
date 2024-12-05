@@ -30,12 +30,12 @@ int PacketHandle::setRawPacket(void *packet_buf, bool with_grh) {
 int PacketHandle::setPayload(void *data, size_t length, bool do_copy) {
     auto &handle = *this;
     if (!handle.packet_buf) {
-        LOG(ERROR) << "Unable to set data: packet buf not specified";
+        LOG(ERROR) << "unable to set data: packet buf not specified";
         return -1;
     }
 
     if (!data && length) {
-        LOG(ERROR) << "Invalid argument: data is nullptr";
+        LOG(ERROR) << "invalid argument: data is nullptr";
         return -1;
     }
 
@@ -52,11 +52,7 @@ int PacketHandle::setPayload(void *data, size_t length, bool do_copy) {
 
 void *PacketHandle::getPayload() {
     auto &handle = *this;
-    if (!handle.packet_buf) {
-        LOG(ERROR) << "Unable to get data: packet buf not specified";
-        return nullptr;
-    }
-    if (!handle.data_len) return nullptr;
+    if (!handle.packet_buf || !handle.data_len) return nullptr;
     if (handle.data_buf) return handle.data_buf;
     return (char *)handle.packet_buf + sizeof(PktHdr) +
            (with_grh ? kGRHSize : 0);
@@ -65,14 +61,14 @@ void *PacketHandle::getPayload() {
 int PacketHandle::deserialize(uint32_t imm_data, uint32_t packet_length) {
     if (with_grh) {
         if (packet_length < sizeof(PktHdr) + kGRHSize) {
-            LOG(ERROR) << "packet_length must be larger than header & GRH size";
+            LOG(ERROR) << "packet length must be larger than header & GRH size";
             return -1;
         }
         pkt_hdr_imm.raw = imm_data;
         data_len = packet_length - sizeof(PktHdr) - kGRHSize;
     } else {
         if (packet_length < sizeof(PktHdr)) {
-            LOG(ERROR) << "packet_length must be larger than header size";
+            LOG(ERROR) << "packet length must be larger than header size";
             return -1;
         }
         pkt_hdr_imm.raw = imm_data;
@@ -84,11 +80,11 @@ int PacketHandle::deserialize(uint32_t imm_data, uint32_t packet_length) {
 int PacketHandle::serialize(std::vector<Buffer> &slices, uint32_t &imm_data) {
     auto &handle = *this;
     if (!handle.packet_buf) {
-        LOG(ERROR) << "Unable to get stream: packet buf not specified";
+        LOG(ERROR) << "unable to get stream: packet buf not specified";
         return -1;
     }
     if (with_grh) {
-        LOG(ERROR) << "Refuse to send packet with GRH field";
+        LOG(ERROR) << "refuse to send packet with GRH field";
         return -1;
     }
     if (encode()) return -1;
@@ -112,7 +108,7 @@ int PacketHandle::serialize(std::vector<Buffer> &slices, uint32_t &imm_data) {
 int PacketHandle::encode() {
     auto &handle = *this;
     if (!handle.packet_buf) {
-        LOG(ERROR) << "Unable to encode: packet buf not specified";
+        LOG(ERROR) << "unable to encode: packet buf not specified";
         return -1;
     }
     PktHdrImm pkt_hdr;
@@ -136,7 +132,7 @@ int PacketHandle::encode() {
 int PacketHandle::decode() {
     auto &handle = *this;
     if (!handle.packet_buf) {
-        LOG(ERROR) << "Unable to decode: packet buf not specified";
+        LOG(ERROR) << "unable to decode: packet buf not specified";
         return -1;
     }
     PktHdrImm pkt_hdr = handle.pkt_hdr_imm;
@@ -170,13 +166,11 @@ int PacketBufferPool::construct() {
         PLOG(ERROR) << "posix_memalign failed";
         return ret;
     }
-
     for (size_t index = 0; index < max_packets_; ++index) {
         uint8_t *ptr = (uint8_t *)arena_ + mtu_size_ * index;
         *(uintptr_t *)ptr = (uintptr_t)global_free_buffer_;
         global_free_buffer_ = ptr;
     }
-
     return 0;
 }
 
@@ -192,7 +186,7 @@ int PacketBufferPool::allocatePacket(PacketHandle &handle, bool with_grh) {
     RWSpinlock::WriteGuard guard(arena_lock_);
     void *packet_buf = global_free_buffer_;
     if (!packet_buf) {
-        LOG(ERROR) << "Out of memory";
+        LOG(ERROR) << "out of memory";
         return -1;
     }
     uintptr_t next = *(uintptr_t *)packet_buf;
@@ -204,24 +198,9 @@ int PacketBufferPool::freePacket(PacketHandle &handle) {
     RWSpinlock::WriteGuard guard(arena_lock_);
     auto packet_buf = handle.packet_buf;
     if (!packet_buf) {
-        LOG(ERROR) << "Invalid packet handle";
+        LOG(ERROR) << "invalid packet handle";
         return -1;
     }
-    *(uintptr_t *)packet_buf = (uintptr_t)global_free_buffer_;
-    global_free_buffer_ = packet_buf;
-    return 0;
-}
-
-int PacketBufferPool::freePacketDirect(void *addr) {
-    RWSpinlock::WriteGuard guard(arena_lock_);
-    if (!addr || (uint8_t *)addr < (uint8_t *)arena_ ||
-        (uint8_t *)addr >= (uint8_t *)arena_ + getCapacity()) {
-        LOG(ERROR) << "Invalid packet handle";
-        return -1;
-    }
-    auto packet_buf =
-        (uint8_t *)arena_ +
-        ((uint8_t *)addr - (uint8_t *)arena_) / mtu_size_ * mtu_size_;
     *(uintptr_t *)packet_buf = (uintptr_t)global_free_buffer_;
     global_free_buffer_ = packet_buf;
     return 0;
@@ -241,25 +220,31 @@ SendQueue::SendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
     handle_.resize(queue_capacity);
 }
 
+SendQueue::~SendQueue() {
+    for (auto &entry : handle_) {
+        if (entry.getPayload()) {
+            pool_.freePacket(entry);
+        }
+    }
+    handle_.clear();
+}
+
 int SendQueue::push(const std::vector<Buffer> &slice_list, uint32_t &last_sn) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    RWSpinlock::WriteGuard guard(queue_lock_);
     auto fragment_id = secondary_queue_.push(slice_list);
     last_sn = SHORT_SN(fragment_id.second);
     return fillPrimaryQueue();
 }
 
 int SendQueue::markCompleted(uint32_t ack_sn) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    RWSpinlock::WriteGuard guard(queue_lock_);
     while (tail_ != head_ && SHORT_SN(tail_) != SHORT_SN(ack_sn)) {
-        auto &handle = handle_[tail_ % queue_capacity_];
-        // pool_.freePacket(handle);
         tail_++;
     }
     return fillPrimaryQueue();
 }
 
 int SendQueue::fillPrimaryQueue() {
-    // including uint64_t wrap-up (i.e., head_ < tail_)
     while (secondary_queue_.hasRemainingFragment() &&
            head_ - tail_ <= wnd_size_) {
         auto slice = secondary_queue_.popFragment();
@@ -278,12 +263,14 @@ int SendQueue::fillPrimaryQueue() {
 }
 
 int SendQueue::getIndexRange(uint64_t &head, uint64_t &tail) {
+    RWSpinlock::ReadGuard guard(queue_lock_);
     head = head_;
     tail = tail_;
     return 0;
 }
 
 int SendQueue::forEach(std::function<int(PacketHandle &)> func) {
+    RWSpinlock::ReadGuard guard(queue_lock_);
     for (auto curr = tail_.load(); curr != head_.load(); curr++) {
         auto &handle = handle_[curr % queue_capacity_];
         func(handle);
@@ -306,19 +293,26 @@ ReceiveQueue::ReceiveQueue(size_t mtu_size, size_t queue_capacity,
 
 int ReceiveQueue::push(const std::vector<Buffer> &slice_list,
                        uint32_t &last_sn) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    RWSpinlock::WriteGuard guard(queue_lock_);
     auto fragment_id = secondary_queue_.push(slice_list);
     last_sn = SHORT_SN(fragment_id.second);
     return fillPrimaryQueue();
 }
 
 int ReceiveQueue::markCompleted(PacketHandle &handle) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    RWSpinlock::WriteGuard guard(queue_lock_);
+    auto wnd_start = SHORT_SN(tail_);
+    auto wnd_end = SHORT_SN(tail_ + wnd_size_);
+    if (wnd_start <= wnd_end) {
+        if (handle.sn < wnd_start || handle.sn >= wnd_end) return 0;
+    } else {
+        if (handle.sn < wnd_start && handle.sn >= wnd_end) return 0;
+    }
     auto &request = requests_[handle.sn % queue_capacity_];
     if (request.inflight) {
         if (handle.getPayloadLength() != request.length)
-            LOG(ERROR) << "Mismatch data length, " << handle.getPayloadLength()
-                       << " vs " << request.length;
+            LOG(ERROR) << "data length mismatched, packet " << handle.getPayloadLength()
+                       << ", request " << request.length;
         else
             memmove(request.addr, handle.getPayload(), request.length);
         request.inflight = false;
@@ -345,6 +339,7 @@ int ReceiveQueue::fillPrimaryQueue() {
 }
 
 int ReceiveQueue::getIndexRange(uint64_t &head, uint64_t &tail) {
+    RWSpinlock::ReadGuard guard(queue_lock_);
     head = head_;
     tail = tail_;
     return 0;
@@ -399,7 +394,8 @@ ReceiveQueue &PacketManager::getReceiveQueue(int sid) {
     queue_lock_.unlockShared();
     queue_lock_.lock();
     if (!receive_queue_.count(sid)) {
-        auto entry = new ReceiveQueue(mtu_size_, queue_capacity_, wnd_size_, sid % 256);
+        auto entry =
+            new ReceiveQueue(mtu_size_, queue_capacity_, wnd_size_, sid % 256);
         receive_queue_[sid] = entry;
     }
     auto &entry = receive_queue_[sid];

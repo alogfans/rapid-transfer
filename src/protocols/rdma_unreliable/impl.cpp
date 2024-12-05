@@ -11,40 +11,22 @@
 #include <sys/socket.h>
 
 namespace rapid {
-static std::string getSocketAddress(const std::string &device_name) {
-    struct ifreq ifr;
-    struct sockaddr_in *sin;
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd == -1) {
-        PLOG(ERROR) << "Failed to create socket";
-        return "";
-    }
-    memset(&ifr, 0, sizeof(ifr));
-    strncpy(ifr.ifr_name, device_name.c_str(), IFNAMSIZ - 1);
-    if (ioctl(fd, SIOCGIFADDR, &ifr) < 0) {
-        PLOG(ERROR) << "Failed to ioctl";
-        close(fd);
-        return "";
-    }
-    close(fd);
-    sin = (struct sockaddr_in *)&ifr.ifr_addr;
-    return std::string(inet_ntoa(sin->sin_addr));
-}
-
 RdmaUnreliableProtocol::RdmaUnreliableProtocol() {}
 
 RdmaUnreliableProtocol::~RdmaUnreliableProtocol() { deconstruct(); }
 
 int RdmaUnreliableProtocol::construct(const std::string &device_name,
                                       uint8_t rdma_port, int gid_index) {
-    int ret = context_.construct(getSocketAddress(device_name), device_name,
-                                 rdma_port, gid_index);
+    int ret = context_.construct(device_name, rdma_port, gid_index);
     if (ret) return ret;
     worker_running_ = true;
     worker_ = std::thread([this]() {
         while (worker_running_) {
             int rc = context_.runStep();
-            if (rc) return rc;
+            if (rc) {
+                LOG(WARNING) << "worker terminated unexceptedly";
+                return rc;
+            }
         }
         return 0;
     });
@@ -52,23 +34,25 @@ int RdmaUnreliableProtocol::construct(const std::string &device_name,
 }
 
 int RdmaUnreliableProtocol::deconstruct() {
-    if (worker_running_.exchange(false)) {
-        worker_.join();
-    }
+    if (worker_running_.exchange(false)) worker_.join();
     return context_.deconstruct();
 }
 
 int RdmaUnreliableProtocol::prepareConnection(const std::string &peer_name,
                                               Attributes &local) {
+    LOG(INFO) << "prepare connection " << this << " " << peer_name;
     return context_.prepareConnection(peer_name, local);
 }
 
 int RdmaUnreliableProtocol::setupConnection(const std::string &peer_name,
                                             const Attributes &peer) {
+    LOG(INFO) << "setup connection " << this << " " << peer_name;
     return context_.setupConnection(peer_name, peer);
 }
 
-int RdmaUnreliableProtocol::freeTask(TaskID task_id) { return 0; }
+int RdmaUnreliableProtocol::freeTask(TaskID task_id) {
+    return context_.freeTask(task_id);
+}
 
 TaskID RdmaUnreliableProtocol::send(const std::string &peer_name,
                                     const std::vector<Buffer> &buffer_list) {
