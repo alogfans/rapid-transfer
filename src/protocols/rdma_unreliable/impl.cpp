@@ -40,13 +40,11 @@ int RdmaUnreliableProtocol::deconstruct() {
 
 int RdmaUnreliableProtocol::prepareConnection(const std::string &peer_name,
                                               Attributes &local) {
-    LOG(INFO) << "prepare connection " << this << " " << peer_name;
     return context_.prepareConnection(peer_name, local);
 }
 
 int RdmaUnreliableProtocol::setupConnection(const std::string &peer_name,
                                             const Attributes &peer) {
-    LOG(INFO) << "setup connection " << this << " " << peer_name;
     return context_.setupConnection(peer_name, peer);
 }
 

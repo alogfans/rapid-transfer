@@ -238,13 +238,20 @@ int SendQueue::push(const std::vector<Buffer> &slice_list, uint32_t &last_sn) {
 
 int SendQueue::markCompleted(uint32_t ack_sn) {
     RWSpinlock::WriteGuard guard(queue_lock_);
-    while (tail_ != head_ && SHORT_SN(tail_) != SHORT_SN(ack_sn)) {
-        tail_++;
-    }
+    // case 1: XXX tail_ ... ack_sn ... head_ XXX
+    // case 2: ... ack_sn ... head  XXX tail ...
+    auto tail = SHORT_SN(tail_), head = SHORT_SN(head_);
+    if (tail <= head && tail <= ack_sn && ack_sn <= head)
+        tail_ = tail_ + (ack_sn - tail);
+    else if (tail > head && ack_sn <= head)
+        tail_ = head_ - (head - ack_sn);
+    else if (tail > head && ack_sn >= tail)
+        tail_ = tail_ + (ack_sn - tail);
     return fillPrimaryQueue();
 }
 
 int SendQueue::fillPrimaryQueue() {
+    // including wrap-ups
     while (secondary_queue_.hasRemainingFragment() &&
            head_ - tail_ <= wnd_size_) {
         auto slice = secondary_queue_.popFragment();
@@ -310,10 +317,11 @@ int ReceiveQueue::markCompleted(PacketHandle &handle) {
     }
     auto &request = requests_[handle.sn % queue_capacity_];
     if (request.inflight) {
-        if (handle.getPayloadLength() != request.length)
+        if (handle.getPayloadLength() != request.length) {
             LOG(ERROR) << "data length mismatched, packet " << handle.getPayloadLength()
                        << ", request " << request.length;
-        else
+            abort();
+        } else
             memmove(request.addr, handle.getPayload(), request.length);
         request.inflight = false;
     }
@@ -366,13 +374,13 @@ int PacketManager::deconstruct() {
 }
 
 SendQueue &PacketManager::getSendQueue(int sid) {
-    queue_lock_.lockShared();
+    //queue_lock_.lockShared();
     if (send_queue_.count(sid)) {
         auto &entry = send_queue_[sid];
-        queue_lock_.unlockShared();
+        //queue_lock_.unlockShared();
         return *entry;
     }
-    queue_lock_.unlockShared();
+    //queue_lock_.unlockShared();
     queue_lock_.lock();
     if (!send_queue_.count(sid)) {
         auto entry = new SendQueue(mtu_size_, queue_capacity_, wnd_size_, pool_,
@@ -385,13 +393,13 @@ SendQueue &PacketManager::getSendQueue(int sid) {
 }
 
 ReceiveQueue &PacketManager::getReceiveQueue(int sid) {
-    queue_lock_.lockShared();
+    //queue_lock_.lockShared();
     if (receive_queue_.count(sid)) {
         auto &entry = receive_queue_[sid];
-        queue_lock_.unlockShared();
+        //queue_lock_.unlockShared();
         return *entry;
     }
-    queue_lock_.unlockShared();
+    //queue_lock_.unlockShared();
     queue_lock_.lock();
     if (!receive_queue_.count(sid)) {
         auto entry =

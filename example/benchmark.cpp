@@ -100,6 +100,9 @@ int receiveThread(int thread_id)
             if (status == rapid::SUCCESS)
             {
                 engine->freeTask(entry.second);
+                // auto base = *((char *)addr);
+                // for (uint64_t i = 0; i < FLAGS_block_size; ++i)
+                //     assert(*((char *)addr + i) == char(base + i % 256));
                 entry.second = engine->receive(entry.first, {{addr, FLAGS_block_size}});
             }
         }
@@ -140,6 +143,9 @@ int sendThread(pthread_barrier_t *barrier, int thread_id)
     {
         uint16_t port = FLAGS_first_port + lrand48() % FLAGS_threads;
         auto target = FLAGS_target_hostname + ":" + std::to_string(port);
+        // auto base = lrand48();
+        // for (uint64_t i = 0; i < chunk_size; ++i)
+        //     *((char *)addr + i) = (i + base) % 256;
         TaskID task_id = engine->send(target, {{addr, chunk_size}});
         if (task_id < 0)
         {
