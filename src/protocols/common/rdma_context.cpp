@@ -18,9 +18,9 @@
 #include "rdma_rc_endpoint_store.h"
 
 DEFINE_uint32(num_qp_per_endpoint, 1, "Number of QPs per endpoint");
-DEFINE_uint32(max_sge_per_wr, 1, "Max SGE count per work request");
+DEFINE_uint32(max_sge_per_wr, 2, "Max SGE count per work request");
 DEFINE_uint32(max_wr_per_qp, 256, "Max WR count per QP");
-DEFINE_uint32(max_inline_bytes, 0, "Inline bytes for data sending");
+DEFINE_uint32(max_inline_bytes, 64, "Inline bytes for data sending");
 DEFINE_uint32(max_cqe_count, 4096, "Max CQE count");
 
 namespace rapid {

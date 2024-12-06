@@ -50,6 +50,7 @@ class RdmaUDEndPointStore {
     std::vector<ibv_qp *> qp_list_;
     volatile int *send_wr_depth_list_, *recv_wr_depth_list_;
     int max_wr_depth_;
+    int max_inline_bytes_;
 
     ibv_cq *send_cq_, *recv_cq_;
     RdmaContext &context_;

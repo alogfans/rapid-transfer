@@ -262,7 +262,7 @@ int SendQueue::fillPrimaryQueue() {
         handle.wnd = wnd_size_;
         handle.sn = SHORT_SN(head_);
         handle.ts = 0;
-        if (handle.setPayload(slice.addr, slice.length, true)) return -1;
+        if (handle.setPayload(slice.addr, slice.length, false)) return -1;
         handle.inflight = true;
         head_++;
     }

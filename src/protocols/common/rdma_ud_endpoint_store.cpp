@@ -13,6 +13,7 @@ int RdmaUDEndPointStore::construct(ibv_cq *send_cq, ibv_cq *recv_cq,
     send_cq_ = send_cq;
     recv_cq_ = recv_cq;
     max_wr_depth_ = (int)max_wr_per_qp;
+    max_inline_bytes_ = (int)max_inline_bytes;
     qp_list_.resize(num_qp_per_endpoint);
     send_wr_depth_list_ = new volatile int[num_qp_per_endpoint];
     recv_wr_depth_list_ = new volatile int[num_qp_per_endpoint];
@@ -152,9 +153,13 @@ int RdmaUDEndPointStore::postSendRequest(
     if (wr_count == 0) return 0;
 
     ibv_sge sge_list[kMaxSgeCount * wr_count];
-    int actual_sge_count = 0;
+    ibv_send_wr wr_list[wr_count], *bad_wr = nullptr;
+    memset(wr_list, 0, sizeof(ibv_send_wr) * wr_count);
     for (int i = 0; i < wr_count; ++i) {
         auto &request = request_list[i];
+        auto &wr = wr_list[i];
+        int actual_sge_count = 0;
+        int actual_length = 0;
         for (int j = 0; j < kMaxSgeCount; j++) {
             if (!request->addr[j]) break;
             auto &sge = sge_list[i * kMaxSgeCount + j];
@@ -162,20 +167,16 @@ int RdmaUDEndPointStore::postSendRequest(
             sge.length = request->length[j];
             sge.lkey = request->lkey[j];
             actual_sge_count++;
+            actual_length += int(sge.length);
         }
-    }
-
-    ibv_send_wr wr_list[wr_count], *bad_wr = nullptr;
-    memset(wr_list, 0, sizeof(ibv_send_wr) * wr_count);
-    for (int i = 0; i < wr_count; ++i) {
-        auto &request = request_list[i];
-        auto &wr = wr_list[i];
         wr.wr_id = (uint64_t)request;
         wr.opcode = request->imm_data ? IBV_WR_SEND_WITH_IMM : IBV_WR_SEND;
         wr.imm_data = request->imm_data;
         wr.num_sge = actual_sge_count;
         wr.sg_list = &sge_list[i * kMaxSgeCount];
         wr.send_flags = IBV_SEND_SIGNALED;
+        if (actual_length < max_inline_bytes_)
+            wr.send_flags |= IBV_SEND_INLINE;
         wr.next = (i + 1 == wr_count) ? nullptr : &wr_list[i + 1];
         wr.wr.ud.ah = ah;
         wr.wr.ud.remote_qkey = 0;
@@ -185,7 +186,7 @@ int RdmaUDEndPointStore::postSendRequest(
     __sync_fetch_and_add(&send_wr_depth_list_[qp_index], wr_count);
     int rc = ibv_post_send(qp_list_[qp_index], wr_list, &bad_wr);
     if (rc) {
-        PLOG(ERROR) << "ibv_post_send failed";
+        PLOG(ERROR) << "ibv_post_send failed: " << rc;
         while (bad_wr) {
             int i = bad_wr - wr_list;
             request_list[i]->status = FAILED;
@@ -203,9 +204,12 @@ int RdmaUDEndPointStore::postReceiveRequest(
     if (wr_count == 0) return 0;
 
     ibv_sge sge_list[kMaxSgeCount * wr_count];
-    int actual_sge_count = 0;
+    ibv_recv_wr wr_list[wr_count], *bad_wr = nullptr;
+    memset(wr_list, 0, sizeof(ibv_recv_wr) * wr_count);
     for (int i = 0; i < wr_count; ++i) {
         auto &request = request_list[i];
+        auto &wr = wr_list[i];
+        int actual_sge_count = 0;
         for (int j = 0; j < kMaxSgeCount; j++) {
             if (!request->addr[j]) break;
             auto &sge = sge_list[i * kMaxSgeCount + j];
@@ -214,13 +218,6 @@ int RdmaUDEndPointStore::postReceiveRequest(
             sge.lkey = request->lkey[j];
             actual_sge_count++;
         }
-    }
-
-    ibv_recv_wr wr_list[wr_count], *bad_wr = nullptr;
-    memset(wr_list, 0, sizeof(ibv_recv_wr) * wr_count);
-    for (int i = 0; i < wr_count; ++i) {
-        auto &request = request_list[i];
-        auto &wr = wr_list[i];
         wr.wr_id = (uint64_t)request;
         wr.num_sge = actual_sge_count;
         wr.sg_list = &sge_list[i * kMaxSgeCount];
