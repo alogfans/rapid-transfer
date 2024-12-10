@@ -121,7 +121,7 @@ int PacketHandle::encode() {
     handle.pkt_hdr_imm.raw = pkt_hdr.raw;
     if (!pkt_hdr.compacted) {
         PktHdr *hdr = (PktHdr *)handle.packet_buf;
-        hdr->hdr_imm.raw = pkt_hdr.raw;
+        // hdr->hdr_imm.raw = pkt_hdr.raw;
         hdr->wnd = htole16(handle.wnd);
         hdr->ts_lo = htole16(uint16_t(handle.ts & 0xffff));
         hdr->ts_hi = htole32(uint32_t((handle.ts >> 16) & 0xffffffff));
@@ -141,7 +141,7 @@ int PacketHandle::decode() {
             (PktHdr *)((char *)handle.packet_buf + (with_grh ? kGRHSize : 0));
         handle.wnd = le16toh(hdr->wnd);
         handle.ts = (uint64_t(le32toh(hdr->ts_hi)) << 16) | le16toh(hdr->ts_lo);
-        pkt_hdr.raw = hdr->hdr_imm.raw;
+        // pkt_hdr.raw = hdr->hdr_imm.raw;
     }
     handle.session = pkt_hdr.session;
     handle.cmd = pkt_hdr.cmd;

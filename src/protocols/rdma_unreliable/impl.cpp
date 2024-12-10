@@ -11,8 +11,12 @@
 #include <sys/socket.h>
 
 namespace rapid {
-RdmaUnreliableProtocol::RdmaUnreliableProtocol(bool spawn_worker)
-    : spawn_worker_(spawn_worker) {}
+RdmaUnreliableProtocol::RdmaUnreliableProtocol(size_t mtu_size,
+                                               size_t max_packets, 
+                                               size_t queue_capacity,
+                                               bool spawn_worker)
+    : context_(mtu_size, max_packets, queue_capacity),
+      spawn_worker_(spawn_worker) {}
 
 RdmaUnreliableProtocol::~RdmaUnreliableProtocol() { deconstruct(); }
 

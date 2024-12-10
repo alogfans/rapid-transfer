@@ -11,10 +11,9 @@ static inline uint64_t GetCurrentTS() {
     return (tv_now.tv_sec * 1000000 + tv_now.tv_usec);
 }
 
-Context::Context() : next_task_id_(0) {}
-
 Context::Context(size_t mtu_size, size_t max_packets, size_t queue_capacity)
-    : packet_manager_(mtu_size, max_packets, queue_capacity),
+    : mtu_size_(mtu_size),
+      packet_manager_(mtu_size, max_packets, queue_capacity),
       next_task_id_(0) {}
 
 Context::~Context() {}
@@ -224,9 +223,20 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
 int Context::sendDataPackets(uint64_t current_ts) {
     auto &context = controller_.context();
     for (auto session : active_session_map_) {
+        auto endpoint = controller_.getOrCreateEndpoint(session.first);
+        if (!endpoint) return -1;
+        std::vector<Request *> request_list;
         packet_manager_.getSendQueue(session.first)
             .forEach([&](PacketHandle &handle) -> int {
                 if (current_ts - handle.ts < recv_rto_) return 0;
+                if (handle.ts) {
+                    session.second.ssthresh =
+                        std::max(kMinSSThreshValue, session.second.cwnd / 2);
+                    session.second.cwnd = 1;
+                    session.second.incr = mtu_size_;
+                    packet_manager_.getSendQueue(session.first)
+                        .setWndSize(session.second.cwnd);
+                }
                 handle.ts = current_ts;
                 std::vector<Buffer> slices;
                 uint32_t imm_data;
@@ -246,13 +256,24 @@ int Context::sendDataPackets(uint64_t current_ts) {
                         .imm_data = imm_data};
                 else
                     return -1;
-                auto endpoint = controller_.getOrCreateEndpoint(session.first);
-                if (!endpoint) return -1;
-                int rc = endpoint->postSendRequest({request});
-                session.second.send_packets++;
-                stats_.send_packets.fetch_add(1, std::memory_order_relaxed);
-                return rc;
+                request_list.push_back(request);
+                if (request_list.size() == 4) {
+                    auto request_list_len = request_list.size();
+                    endpoint->postSendRequest(request_list);
+                    session.second.send_packets += request_list_len;
+                    stats_.send_packets.fetch_add(request_list_len, 
+                                                  std::memory_order_relaxed);
+                    request_list.clear();
+                }
+                return 0;
             });
+        auto request_list_len = request_list.size();
+        if (request_list_len) {
+            endpoint->postSendRequest(request_list);
+            session.second.send_packets += request_list_len;
+            stats_.send_packets.fetch_add(request_list_len, 
+                                          std::memory_order_relaxed);
+        }            
     }
     return 0;
 }
@@ -300,10 +321,12 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
         return 0;
     }
     if (wc.opcode == IBV_WC_RECV) {
+        uint32_t imm_data = wc.imm_data;
+        if (!(wc.wc_flags & IBV_WC_WITH_IMM)) imm_data = 0;
         PacketHandle handle;
         int ret = handle.setRawPacket((char *)request->addr[0], true);
         if (ret) return ret;
-        ret = handle.deserialize(wc.imm_data, wc.byte_len);
+        ret = handle.deserialize(imm_data, wc.byte_len);
         if (ret) return ret;
         ibv_grh *grh = (ibv_grh *)request->addr[0];
         int session =
@@ -320,8 +343,9 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
                 case PKT_CMD_ACK: {
                     packet_manager_.getSendQueue(session).markCompleted(
                         handle.sn);
-                    updateRTO((current_ts - handle.ts) & ((1ull << 48) - 1));
-                    // timely_.update(current_ts - packet.hdr.ts, current_ts);
+                    auto rtt = (current_ts - handle.ts) & ((1ull << 48) - 1);
+                    updateRTO(rtt);
+                    updateWndOnSuccess(session, handle.wnd);
                     break;
                 }
                 default:
@@ -347,6 +371,26 @@ void Context::updateRTO(uint64_t rtt) {
     }
     uint64_t rto = recv_srtt_ + 4 * recv_rttval_;
     recv_rto_ = std::min(std::max(kMinRTO, rto), kMaxRTO);
+}
+
+void Context::updateWndOnSuccess(int session, uint32_t rwnd) {
+    auto &entry = active_session_map_[session];
+    if (entry.cwnd < entry.ssthresh) {
+        entry.cwnd++;
+        entry.incr += mtu_size_;
+    } else {
+        if (entry.incr < mtu_size_) entry.incr = mtu_size_;
+        entry.incr += (mtu_size_ * mtu_size_) / entry.incr + (mtu_size_ / 16);
+        if ((entry.cwnd + 1) * mtu_size_ <= entry.incr) {
+            entry.cwnd = (entry.incr + mtu_size_ - 1) / mtu_size_;
+        }
+    }
+    auto &queue = packet_manager_.getSendQueue(session);
+    entry.rwnd = rwnd;
+    entry.cwnd = std::min(entry.rwnd, entry.cwnd);
+    if (queue.getWndSize() != entry.cwnd) {
+        queue.setWndSize(entry.cwnd);
+    }
 }
 
 }  // namespace rapid

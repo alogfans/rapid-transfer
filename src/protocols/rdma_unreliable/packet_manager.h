@@ -35,11 +35,11 @@ union PktHdrImm {
 };  // 4 bytes
 
 struct PktHdr {
-    PktHdrImm hdr_imm;
+    // PktHdrImm hdr_imm;
     uint16_t wnd;
     uint16_t ts_lo;
     uint32_t ts_hi;
-};  // 12 bytes
+};  // 8 bytes
 
 class PacketHandle {
    public:
@@ -230,14 +230,11 @@ class ReceiveQueue {
 
 class PacketManager {
    public:
-    const static size_t kDefaultMTUSize = 4096;
-    const static size_t kMaxPackets = 102400;
-    const static size_t kQueueCapacity = 4096;
     const static size_t kWndSize = 256;
 
-    PacketManager(size_t mtu_size = kDefaultMTUSize,
-                  size_t max_packets = kMaxPackets,
-                  size_t queue_capacity = kQueueCapacity,
+    PacketManager(size_t mtu_size,
+                  size_t max_packets,
+                  size_t queue_capacity,
                   size_t wnd_size = kWndSize);
 
     ~PacketManager();

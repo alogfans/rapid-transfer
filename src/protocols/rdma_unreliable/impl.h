@@ -13,7 +13,14 @@
 
 namespace rapid {
 struct RdmaUnreliableProtocol : public Protocol {
-    RdmaUnreliableProtocol(bool spawn_worker = false);
+    const static size_t kDefaultMTUSize = 4096;
+    const static size_t kMaxPackets = 102400;
+    const static size_t kQueueCapacity = 4096;
+    
+    RdmaUnreliableProtocol(size_t mtu_size = kDefaultMTUSize, 
+                           size_t max_packets = kMaxPackets, 
+                           size_t queue_capacity = kQueueCapacity,
+                           bool spawn_worker = false);
 
     virtual ~RdmaUnreliableProtocol();
     RdmaUnreliableProtocol(const RdmaUnreliableProtocol &) = delete;

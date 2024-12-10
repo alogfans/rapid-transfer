@@ -28,7 +28,8 @@ int RdmaUDEndPoint::postSendRequest(
         return -1;
     }
     auto remote_qpn = peer_qp_num_list_[lrand48() % peer_qp_num_list_.size()];
-    return store_.postSendRequest(request_list, ah_, remote_qpn);
+    auto qp_index = lrand48() % store_.qpNum().size();
+    return store_.postSendRequest(request_list, ah_, remote_qpn, qp_index);
 }
 
 int RdmaUDEndPoint::postReceiveRequest(
@@ -37,7 +38,8 @@ int RdmaUDEndPoint::postReceiveRequest(
         LOG(ERROR) << "Failed to post send request: not connected";
         return -1;
     }
-    return store_.postReceiveRequest(request_list);
+    auto qp_index = lrand48() % store_.qpNum().size();
+    return store_.postReceiveRequest(request_list, qp_index);
 }
 
 int RdmaUDEndPoint::setupConnection(const std::string &peer_gid,

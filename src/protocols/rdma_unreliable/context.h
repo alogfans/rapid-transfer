@@ -13,8 +13,6 @@
 namespace rapid {
 class Context {
    public:
-    Context();
-
     Context(size_t mtu_size, size_t max_packets, size_t queue_capacity);
 
     ~Context();
@@ -57,6 +55,8 @@ class Context {
 
     void updateRTO(uint64_t rtt);
 
+    void updateWndOnSuccess(int session, uint32_t rwnd);
+
     int processReceivedPacket(uint64_t current_ts, ibv_wc &wc);
 
     int submitNormalRecvWR(PacketHandle &handle);
@@ -69,19 +69,31 @@ class Context {
     };
 
    private:
+    const uint32_t mtu_size_;
     Controller controller_;
     PacketManager packet_manager_;
 
     std::unordered_map<TaskID, Task> task_map_;
     std::atomic<TaskID> next_task_id_;
 
+    const static uint32_t kMinSSThreshValue = 2;
+
     struct SessionInfo {
-        SessionInfo() : send_packets(0), recv_packets(0), ack_packets(0) {}
+        SessionInfo()
+            : send_packets(0),
+              recv_packets(0),
+              ack_packets(0),
+              cwnd(1), 
+              rwnd(PacketManager::kWndSize),
+              ssthresh(kMinSSThreshValue),
+              incr(0) {}
 
         PacketHandle ack_handle;
         uint64_t send_packets;
         uint64_t recv_packets;
         uint64_t ack_packets;
+
+        uint32_t cwnd, rwnd, ssthresh, incr;
     };
     std::unordered_map<int, SessionInfo> active_session_map_;
 
