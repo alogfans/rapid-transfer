@@ -11,12 +11,11 @@ static inline uint64_t GetCurrentTS() {
     return (tv_now.tv_sec * 1000000 + tv_now.tv_usec);
 }
 
-Context::Context() : next_task_id_(0), send_timeout_(kDefaultSendTimeout) {}
+Context::Context() : next_task_id_(0) {}
 
 Context::Context(size_t mtu_size, size_t max_packets, size_t queue_capacity)
     : packet_manager_(mtu_size, max_packets, queue_capacity),
-      next_task_id_(0),
-      send_timeout_(kDefaultSendTimeout) {}
+      next_task_id_(0) {}
 
 Context::~Context() {}
 
@@ -77,7 +76,7 @@ int Context::runStep() {
     ret = pollCompletedPackets(SEND_CQ, current_ts);
     if (ret < 0) return ret;
 
-#ifndef DEBUG
+#ifdef DEBUG
     thread_local uint64_t last_ts = 0;
     if (current_ts - last_ts > 1000000) {
         thread_local uint64_t last_recv_packets = 0;
@@ -227,7 +226,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
     for (auto session : active_session_map_) {
         packet_manager_.getSendQueue(session.first)
             .forEach([&](PacketHandle &handle) -> int {
-                if (current_ts - handle.ts < send_timeout_) return 0;
+                if (current_ts - handle.ts < recv_rto_) return 0;
                 handle.ts = current_ts;
                 std::vector<Buffer> slices;
                 uint32_t imm_data;
@@ -269,7 +268,7 @@ int Context::sendAckPackets(uint64_t current_ts) {
         handle.cmd = PKT_CMD_ACK;
         handle.wnd = queue.getWndSize();
         handle.sn = queue.getAckSN();
-        handle.ts = current_ts;
+        handle.ts = queue.getLastTS();
         handle.inflight = true;
         std::vector<Buffer> slices;
         uint32_t imm_data;
@@ -321,7 +320,7 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
                 case PKT_CMD_ACK: {
                     packet_manager_.getSendQueue(session).markCompleted(
                         handle.sn);
-                    // updateRTO(current_ts - packet.hdr.ts);
+                    updateRTO((current_ts - handle.ts) & ((1ull << 48) - 1));
                     // timely_.update(current_ts - packet.hdr.ts, current_ts);
                     break;
                 }
@@ -335,19 +334,19 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
     return 0;
 }
 
-// void Context::updateRTO(uint64_t rtt) {
-//     if (recv_srtt_ == 0) {
-//         recv_srtt_ = rtt;
-//         recv_rttval_ = rtt / 2;
-//     } else {
-//         long delta = rtt - recv_srtt_;
-//         if (delta < 0) delta = -delta;
-//         recv_rttval_ = (3 * recv_rttval_ + delta) / 4;
-//         recv_srtt_ = (7 * recv_srtt_ + rtt) / 8;
-//         if (recv_srtt_ < 1) recv_srtt_ = 1;
-//     }
-//     uint64_t rto = recv_srtt_ + 4 * recv_rttval_;
-//     recv_rto_ = std::min(std::max(kMinRTO, rto), kMaxRTO);
-// }
+void Context::updateRTO(uint64_t rtt) {
+    if (recv_srtt_ == 0) {
+        recv_srtt_ = rtt;
+        recv_rttval_ = rtt / 2;
+    } else {
+        long delta = rtt - recv_srtt_;
+        if (delta < 0) delta = -delta;
+        recv_rttval_ = (3 * recv_rttval_ + delta) / 4;
+        recv_srtt_ = (7 * recv_srtt_ + rtt) / 8;
+        if (recv_srtt_ < 1) recv_srtt_ = 1;
+    }
+    uint64_t rto = recv_srtt_ + 4 * recv_rttval_;
+    recv_rto_ = std::min(std::max(kMinRTO, rto), kMaxRTO);
+}
 
 }  // namespace rapid

@@ -85,8 +85,10 @@ class Context {
     };
     std::unordered_map<int, SessionInfo> active_session_map_;
 
-    const static size_t kDefaultSendTimeout = 8000;  // 8us
-    uint64_t send_timeout_;
+    const static size_t kDefaultRTO = 8196;  // 8us
+    const static size_t kMinRTO = 64;
+    const static size_t kMaxRTO = 8196 * 2;
+    uint64_t recv_srtt_ = 0, recv_rttval_ = 0, recv_rto_ = kDefaultRTO;
     uint32_t local_arena_lkey_;
 
     const static size_t kNumReceiveHandles = 128;

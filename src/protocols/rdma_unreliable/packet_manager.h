@@ -199,6 +199,8 @@ class ReceiveQueue {
 
     uint32_t getAckSN() const { return SHORT_SN(tail_); }
 
+    uint64_t getLastTS() const { return last_packet_ts_; };
+
     int getIndexRange(uint64_t &head, uint64_t &tail);
 
     void setWndSize(uint16_t wnd_size) {
@@ -222,6 +224,7 @@ class ReceiveQueue {
     std::atomic<uint16_t> wnd_size_;
     std::vector<Request> requests_;
     SecondaryQueue secondary_queue_;
+    uint64_t last_packet_ts_;
     RWSpinlock queue_lock_;
 };
 

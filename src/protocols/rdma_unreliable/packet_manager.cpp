@@ -140,7 +140,7 @@ int PacketHandle::decode() {
         PktHdr *hdr =
             (PktHdr *)((char *)handle.packet_buf + (with_grh ? kGRHSize : 0));
         handle.wnd = le16toh(hdr->wnd);
-        handle.ts = uint64_t(le32toh(hdr->ts_hi) << 16) | le16toh(hdr->ts_lo);
+        handle.ts = (uint64_t(le32toh(hdr->ts_hi)) << 16) | le16toh(hdr->ts_lo);
         pkt_hdr.raw = hdr->hdr_imm.raw;
     }
     handle.session = pkt_hdr.session;
@@ -293,7 +293,8 @@ ReceiveQueue::ReceiveQueue(size_t mtu_size, size_t queue_capacity,
       head_(0),
       tail_(0),
       wnd_size_(wnd_size),
-      secondary_queue_(mtu_size - sizeof(PktHdr) - kGRHSize) {
+      secondary_queue_(mtu_size - sizeof(PktHdr) - kGRHSize),
+      last_packet_ts_(0) {
     assert(wnd_size <= queue_capacity);
     requests_.resize(queue_capacity);
 }
@@ -324,6 +325,7 @@ int ReceiveQueue::markCompleted(PacketHandle &handle) {
             abort();
         } else
             memmove(request.addr, handle.getPayload(), request.length);
+        last_packet_ts_ = std::max(last_packet_ts_, handle.ts);
         request.inflight = false;
     }
     while (tail_ != head_) {
