@@ -7,13 +7,13 @@
 #include <map>
 
 #include "concurrency.h"
+#include "context.h"
 #include "protocol.h"
 #include "protocols/common/rdma_context.h"
-#include "context.h"
 
 namespace rapid {
 struct RdmaUnreliableProtocol : public Protocol {
-    RdmaUnreliableProtocol();
+    RdmaUnreliableProtocol(bool spawn_worker = false);
 
     virtual ~RdmaUnreliableProtocol();
     RdmaUnreliableProtocol(const RdmaUnreliableProtocol &) = delete;
@@ -44,8 +44,11 @@ struct RdmaUnreliableProtocol : public Protocol {
 
     virtual int unregisterLocalMemory(void *addr);
 
+    int doEventLoop(int64_t timeout = -1);
+
    private:
     Context context_;
+    const bool spawn_worker_;
     std::atomic<bool> worker_running_;
     std::thread worker_;
 };

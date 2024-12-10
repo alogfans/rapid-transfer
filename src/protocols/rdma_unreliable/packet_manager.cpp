@@ -318,8 +318,9 @@ int ReceiveQueue::markCompleted(PacketHandle &handle) {
     auto &request = requests_[handle.sn % queue_capacity_];
     if (request.inflight) {
         if (handle.getPayloadLength() != request.length) {
-            LOG(ERROR) << "data length mismatched, packet " << handle.getPayloadLength()
-                       << ", request " << request.length;
+            LOG(ERROR) << "data length mismatched, packet "
+                       << handle.getPayloadLength() << ", request "
+                       << request.length;
             abort();
         } else
             memmove(request.addr, handle.getPayload(), request.length);
@@ -374,13 +375,13 @@ int PacketManager::deconstruct() {
 }
 
 SendQueue &PacketManager::getSendQueue(int sid) {
-    //queue_lock_.lockShared();
+    queue_lock_.lockShared();
     if (send_queue_.count(sid)) {
         auto &entry = send_queue_[sid];
-        //queue_lock_.unlockShared();
+        queue_lock_.unlockShared();
         return *entry;
     }
-    //queue_lock_.unlockShared();
+    queue_lock_.unlockShared();
     queue_lock_.lock();
     if (!send_queue_.count(sid)) {
         auto entry = new SendQueue(mtu_size_, queue_capacity_, wnd_size_, pool_,
@@ -393,13 +394,13 @@ SendQueue &PacketManager::getSendQueue(int sid) {
 }
 
 ReceiveQueue &PacketManager::getReceiveQueue(int sid) {
-    //queue_lock_.lockShared();
+    queue_lock_.lockShared();
     if (receive_queue_.count(sid)) {
         auto &entry = receive_queue_[sid];
-        //queue_lock_.unlockShared();
+        queue_lock_.unlockShared();
         return *entry;
     }
-    //queue_lock_.unlockShared();
+    queue_lock_.unlockShared();
     queue_lock_.lock();
     if (!receive_queue_.count(sid)) {
         auto entry =

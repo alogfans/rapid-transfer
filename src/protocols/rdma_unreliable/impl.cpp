@@ -11,7 +11,8 @@
 #include <sys/socket.h>
 
 namespace rapid {
-RdmaUnreliableProtocol::RdmaUnreliableProtocol() {}
+RdmaUnreliableProtocol::RdmaUnreliableProtocol(bool spawn_worker)
+    : spawn_worker_(spawn_worker) {}
 
 RdmaUnreliableProtocol::~RdmaUnreliableProtocol() { deconstruct(); }
 
@@ -19,6 +20,7 @@ int RdmaUnreliableProtocol::construct(const std::string &device_name,
                                       uint8_t rdma_port, int gid_index) {
     int ret = context_.construct(device_name, rdma_port, gid_index);
     if (ret) return ret;
+    if (!spawn_worker_) return 0;
     worker_running_ = true;
     worker_ = std::thread([this]() {
         while (worker_running_) {
@@ -34,7 +36,7 @@ int RdmaUnreliableProtocol::construct(const std::string &device_name,
 }
 
 int RdmaUnreliableProtocol::deconstruct() {
-    if (worker_running_.exchange(false)) worker_.join();
+    if (spawn_worker_ && worker_running_.exchange(false)) worker_.join();
     return context_.deconstruct();
 }
 
@@ -64,7 +66,9 @@ TaskID RdmaUnreliableProtocol::receive(const std::string &peer_name,
 
 Status RdmaUnreliableProtocol::getStatus(TaskID task_id,
                                          size_t *transferred_bytes) {
-    return context_.getStatus(task_id, transferred_bytes);
+    Status status = context_.getStatus(task_id, transferred_bytes);
+    if (status == Status::PENDING && !spawn_worker_) doEventLoop(0);
+    return status;
 }
 
 int RdmaUnreliableProtocol::registerLocalMemory(void *addr, size_t length) {
@@ -73,5 +77,17 @@ int RdmaUnreliableProtocol::registerLocalMemory(void *addr, size_t length) {
 
 int RdmaUnreliableProtocol::unregisterLocalMemory(void *addr) {
     return context_.unregisterLocalMemory(addr);
+}
+
+int RdmaUnreliableProtocol::doEventLoop(int64_t timeout) {
+    if (lrand48() % 8) return 0;  // drop requests
+    do {
+        int rc = context_.runStep();
+        if (rc) {
+            LOG(WARNING) << "worker terminated unexceptedly";
+            return rc;
+        }
+    } while (timeout < 0);
+    return 0;
 }
 }  // namespace rapid

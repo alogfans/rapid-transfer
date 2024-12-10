@@ -82,6 +82,27 @@ int Context::runStep() {
 
     ret = pollCompletedPackets(SEND_CQ, current_ts);
     if (ret < 0) return ret;
+
+#ifdef DEBUG
+    thread_local uint64_t last_ts = 0;
+    if (current_ts - last_ts > 1000000) {
+        thread_local uint64_t last_recv_data_packets = 0;
+        thread_local uint64_t last_send_data_packets = 0;
+        thread_local uint64_t last_request_data_packets = 0;
+        LOG(INFO) << stats_.recv_data_packets.load() - last_recv_data_packets
+                  << " "
+                  << stats_.send_data_packets.load() - last_send_data_packets
+                  << " "
+                  << stats_.request_data_packets.load() -
+                         last_request_data_packets
+                  << " ";
+        last_recv_data_packets = stats_.recv_data_packets.load();
+        last_send_data_packets = stats_.send_data_packets.load();
+        last_request_data_packets = stats_.request_data_packets.load();
+        last_ts = current_ts;
+    }
+#endif
+
     return 0;
 }
 
@@ -217,6 +238,9 @@ int Context::sendDataPackets(uint64_t current_ts) {
         packet_manager_.getSendQueue(session.first)
             .forEach([&](PacketHandle &handle) -> int {
                 if (current_ts - handle.ts < send_timeout_) return 0;
+                if (!handle.ts)
+                    stats_.request_data_packets.fetch_add(
+                        1, std::memory_order_relaxed);
                 handle.ts = current_ts;
                 std::vector<Buffer> slices;
                 uint32_t imm_data;
@@ -239,6 +263,8 @@ int Context::sendDataPackets(uint64_t current_ts) {
                 auto endpoint = controller_.getOrCreateEndpoint(session.first);
                 if (!endpoint) return -1;
                 int rc = endpoint->postSendRequest({request});
+                stats_.send_data_packets.fetch_add(1,
+                                                   std::memory_order_relaxed);
                 return rc;
             });
     }
@@ -295,12 +321,14 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
         if (session >= 0) {
             switch (handle.cmd) {
                 case PKT_CMD_DATA:
-                    packet_manager_.getReceiveQueue(session).markCompleted(handle);
-                    stats_.recv_data_packets.fetch_add(1,
-                                                    std::memory_order_relaxed);
+                    packet_manager_.getReceiveQueue(session).markCompleted(
+                        handle);
+                    stats_.recv_data_packets.fetch_add(
+                        1, std::memory_order_relaxed);
                     break;
                 case PKT_CMD_ACK: {
-                    packet_manager_.getSendQueue(session).markCompleted(handle.sn);
+                    packet_manager_.getSendQueue(session).markCompleted(
+                        handle.sn);
                     // updateRTO(current_ts - packet.hdr.ts);
                     // timely_.update(current_ts - packet.hdr.ts, current_ts);
                     break;

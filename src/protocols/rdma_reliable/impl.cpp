@@ -19,8 +19,11 @@ static std::vector<uint32_t> FromString(const std::string &str) {
     return list;
 }
 
-RdmaReliableProtocol::RdmaReliableProtocol()
-    : valid_(false), endpoint_store_(context_), background_running_(false) {}
+RdmaReliableProtocol::RdmaReliableProtocol(bool spawn_worker)
+    : valid_(false),
+      endpoint_store_(context_),
+      background_running_(false),
+      spawn_worker_(spawn_worker) {}
 
 RdmaReliableProtocol::~RdmaReliableProtocol() { deconstruct(); }
 
@@ -28,16 +31,19 @@ int RdmaReliableProtocol::construct(const std::string &device_name,
                                     uint8_t rdma_port, int gid_index) {
     int ret = context_.construct(device_name, rdma_port, gid_index);
     if (ret) return ret;
-    background_running_ = true;
-    background_worker_ =
-        std::thread(&RdmaReliableProtocol::runBackgroundWorker, this);
+    if (spawn_worker_) {
+        background_running_ = true;
+        background_worker_ =
+            std::thread(&RdmaReliableProtocol::runBackgroundWorker, this);
+    }
     valid_ = true;
     return 0;
 }
 
 int RdmaReliableProtocol::deconstruct() {
     if (!valid_) return 0;
-    if (background_running_.exchange(false)) background_worker_.join();
+    if (spawn_worker_ && background_running_.exchange(false))
+        background_worker_.join();
     task_map_.clear();
     while (!pending_task_.empty()) pending_task_.pop();
     endpoint_store_.deconstruct();
@@ -145,6 +151,7 @@ TaskID RdmaReliableProtocol::receive(const std::string &peer_name,
 
 Status RdmaReliableProtocol::getStatus(TaskID task_id,
                                        size_t *transferred_bytes) {
+    if (!spawn_worker_) doEventLoop(0);
     auto task = getTaskById(task_id);
     if (!task) return UNKNOWN;
     size_t local_transferred_bytes = 0;
@@ -198,7 +205,8 @@ void RdmaReliableProtocol::runBackgroundWorker() {
             pending_task_.pop();
         }
         task_map_lock_.unlock();
-        if (task && inflight_requests + task->request_list.size() <= max_inflight_requests) {
+        if (task && inflight_requests + task->request_list.size() <=
+                        max_inflight_requests) {
             int ret = 0;
             if (task->type == SEND) {
                 ret = task->endpoint->postSendRequest(task->request_list);
@@ -218,12 +226,10 @@ void RdmaReliableProtocol::runBackgroundWorker() {
         }
 
         int ret = poll(SEND);
-        if (ret > 0)
-            inflight_requests -= ret;
+        if (ret > 0) inflight_requests -= ret;
 
         ret = poll(RECEIVE);
-        if (ret > 0)
-            inflight_requests -= ret;
+        if (ret > 0) inflight_requests -= ret;
     }
 }
 
@@ -251,5 +257,45 @@ int RdmaReliableProtocol::poll(int cq_index) {
     }
 
     return nr_poll;
+}
+
+int RdmaReliableProtocol::doEventLoop(int64_t timeout) {
+    do {
+        size_t inflight_requests = 0;
+        const size_t max_inflight_requests = context_.config().max_wr_per_qp;
+        std::shared_ptr<Task> task = nullptr;
+        task_map_lock_.lock();
+        if (!task && !pending_task_.empty()) {
+            task = task_map_[pending_task_.front()];
+            pending_task_.pop();
+        }
+        task_map_lock_.unlock();
+        if (task && inflight_requests + task->request_list.size() <=
+                        max_inflight_requests) {
+            int ret = 0;
+            if (task->type == SEND) {
+                ret = task->endpoint->postSendRequest(task->request_list);
+            } else {
+                ret = task->endpoint->postReceiveRequest(task->request_list);
+            }
+            if (ret < 0) {
+                for (size_t i = 0; i < task->request_list.size(); ++i)
+                    task->request_list[i]->status = FAILED;
+            } else {
+                // Request 0...ret-1 has been sent/received
+                for (size_t i = ret; i < task->request_list.size(); ++i)
+                    task->request_list[i]->status = FAILED;
+                inflight_requests += ret;
+            }
+            task = nullptr;
+        }
+
+        int ret = poll(SEND);
+        if (ret > 0) inflight_requests -= ret;
+
+        ret = poll(RECEIVE);
+        if (ret > 0) inflight_requests -= ret;
+    } while (timeout < 0);
+    return 0;
 }
 }  // namespace rapid

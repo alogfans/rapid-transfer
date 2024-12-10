@@ -15,7 +15,7 @@
 
 namespace rapid {
 struct RdmaReliableProtocol : public Protocol {
-    RdmaReliableProtocol();
+    RdmaReliableProtocol(bool spawn_worker = false);
 
     virtual ~RdmaReliableProtocol();
     RdmaReliableProtocol(const RdmaReliableProtocol &) = delete;
@@ -45,6 +45,8 @@ struct RdmaReliableProtocol : public Protocol {
     virtual int registerLocalMemory(void *addr, size_t length);
 
     virtual int unregisterLocalMemory(void *addr);
+
+    int doEventLoop(int64_t timeout = -1);
 
    public:
     struct Task {
@@ -83,6 +85,7 @@ struct RdmaReliableProtocol : public Protocol {
 
     std::atomic<bool> background_running_;
     std::thread background_worker_;
+    const bool spawn_worker_;
 };
 }  // namespace rapid
 

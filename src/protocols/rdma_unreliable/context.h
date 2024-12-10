@@ -88,8 +88,11 @@ class Context {
     std::vector<PacketHandle> recv_handles_;
 
     struct Stats {
-        Stats() : send_data_packets(0), recv_data_packets(0) {}
-
+        Stats()
+            : request_data_packets(0),
+              send_data_packets(0),
+              recv_data_packets(0) {}
+        std::atomic<uint64_t> request_data_packets;
         std::atomic<uint64_t> send_data_packets;
         std::atomic<uint64_t> recv_data_packets;
     };
