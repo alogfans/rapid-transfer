@@ -76,7 +76,12 @@ class Context {
     std::atomic<TaskID> next_task_id_;
 
     struct SessionInfo {
+        SessionInfo() : send_packets(0), recv_packets(0), ack_packets(0) {}
+
         PacketHandle ack_handle;
+        uint64_t send_packets;
+        uint64_t recv_packets;
+        uint64_t ack_packets;
     };
     std::unordered_map<int, SessionInfo> active_session_map_;
 
@@ -88,13 +93,10 @@ class Context {
     std::vector<PacketHandle> recv_handles_;
 
     struct Stats {
-        Stats()
-            : request_data_packets(0),
-              send_data_packets(0),
-              recv_data_packets(0) {}
-        std::atomic<uint64_t> request_data_packets;
-        std::atomic<uint64_t> send_data_packets;
-        std::atomic<uint64_t> recv_data_packets;
+        Stats() : send_packets(0), recv_packets(0), ack_packets(0) {}
+        std::atomic<uint64_t> send_packets;
+        std::atomic<uint64_t> recv_packets;
+        std::atomic<uint64_t> ack_packets;
     };
 
     Stats stats_;

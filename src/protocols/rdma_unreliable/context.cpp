@@ -69,13 +69,7 @@ int Context::runStep() {
     int ret = pollCompletedPackets(RECV_CQ, current_ts);
     if (ret < 0) return ret;
 
-    thread_local uint64_t snapshot_recv_data_packets = 0;
-    uint64_t recv_data_packets =
-        stats_.recv_data_packets.load(std::memory_order_relaxed);
-    if (snapshot_recv_data_packets != recv_data_packets) {
-        ret = sendAckPackets(current_ts);
-        if (ret == 0) snapshot_recv_data_packets = recv_data_packets;
-    }
+    sendAckPackets(current_ts);
 
     ret = sendDataPackets(current_ts);
     if (ret) return ret;
@@ -83,22 +77,18 @@ int Context::runStep() {
     ret = pollCompletedPackets(SEND_CQ, current_ts);
     if (ret < 0) return ret;
 
-#ifdef DEBUG
+#ifndef DEBUG
     thread_local uint64_t last_ts = 0;
     if (current_ts - last_ts > 1000000) {
-        thread_local uint64_t last_recv_data_packets = 0;
-        thread_local uint64_t last_send_data_packets = 0;
-        thread_local uint64_t last_request_data_packets = 0;
-        LOG(INFO) << stats_.recv_data_packets.load() - last_recv_data_packets
-                  << " "
-                  << stats_.send_data_packets.load() - last_send_data_packets
-                  << " "
-                  << stats_.request_data_packets.load() -
-                         last_request_data_packets
-                  << " ";
-        last_recv_data_packets = stats_.recv_data_packets.load();
-        last_send_data_packets = stats_.send_data_packets.load();
-        last_request_data_packets = stats_.request_data_packets.load();
+        thread_local uint64_t last_recv_packets = 0;
+        thread_local uint64_t last_send_packets = 0;
+        thread_local uint64_t last_ack_packets = 0;
+        LOG(INFO) << stats_.recv_packets.load() - last_recv_packets << " "
+                  << stats_.send_packets.load() - last_send_packets << " "
+                  << stats_.ack_packets.load() - last_ack_packets << " ";
+        last_recv_packets = stats_.recv_packets.load();
+        last_send_packets = stats_.send_packets.load();
+        last_ack_packets = stats_.ack_packets.load();
         last_ts = current_ts;
     }
 #endif
@@ -238,9 +228,6 @@ int Context::sendDataPackets(uint64_t current_ts) {
         packet_manager_.getSendQueue(session.first)
             .forEach([&](PacketHandle &handle) -> int {
                 if (current_ts - handle.ts < send_timeout_) return 0;
-                if (!handle.ts)
-                    stats_.request_data_packets.fetch_add(
-                        1, std::memory_order_relaxed);
                 handle.ts = current_ts;
                 std::vector<Buffer> slices;
                 uint32_t imm_data;
@@ -263,8 +250,8 @@ int Context::sendDataPackets(uint64_t current_ts) {
                 auto endpoint = controller_.getOrCreateEndpoint(session.first);
                 if (!endpoint) return -1;
                 int rc = endpoint->postSendRequest({request});
-                stats_.send_data_packets.fetch_add(1,
-                                                   std::memory_order_relaxed);
+                session.second.send_packets++;
+                stats_.send_packets.fetch_add(1, std::memory_order_relaxed);
                 return rc;
             });
     }
@@ -272,10 +259,12 @@ int Context::sendDataPackets(uint64_t current_ts) {
 }
 
 int Context::sendAckPackets(uint64_t current_ts) {
-    for (auto session : active_session_map_) {
+    for (auto &session : active_session_map_) {
         auto &queue = packet_manager_.getReceiveQueue(session.first);
         PacketHandle &handle = session.second.ack_handle;
-        if (handle.inflight) return -2;
+        if (session.second.ack_packets >= session.second.recv_packets ||
+            handle.inflight)
+            continue;
         handle.session = uint8_t(session.first % 256);
         handle.cmd = PKT_CMD_ACK;
         handle.wnd = queue.getWndSize();
@@ -298,6 +287,8 @@ int Context::sendAckPackets(uint64_t current_ts) {
         if (!endpoint) return -1;
         int ret = endpoint->postSendRequest({request});
         if (ret != 1) return -1;
+        session.second.ack_packets = session.second.recv_packets;
+        stats_.ack_packets.fetch_add(1, std::memory_order_relaxed);
     }
     return 0;
 }
@@ -323,8 +314,9 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
                 case PKT_CMD_DATA:
                     packet_manager_.getReceiveQueue(session).markCompleted(
                         handle);
-                    stats_.recv_data_packets.fetch_add(
-                        1, std::memory_order_relaxed);
+                    stats_.recv_packets.fetch_add(1, std::memory_order_relaxed);
+                    if (active_session_map_.count(session))
+                        active_session_map_[session].recv_packets++;
                     break;
                 case PKT_CMD_ACK: {
                     packet_manager_.getSendQueue(session).markCompleted(
