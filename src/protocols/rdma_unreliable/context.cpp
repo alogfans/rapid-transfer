@@ -40,6 +40,8 @@ int Context::construct(const std::string &device_name, uint8_t rdma_port,
         if (ret < 0) return ret;
         ret = submitNormalRecvWR(recv_handles_[i]);
         if (ret < 0) return ret;
+        auto index = i % controller_.endpointStore().qpNum().size();
+        recv_handles_qp_index_map_[recv_handles_[i].getRawPacket()] = index;
     }
     return 0;
 }
@@ -179,10 +181,11 @@ int Context::unregisterLocalMemory(void *addr) {
 
 int Context::submitNormalRecvWR(PacketHandle &handle) {
     auto &endpoint_store = controller_.endpointStore();
+    int index = recv_handles_qp_index_map_[handle.getRawPacket()];
     Request *request = new Request{.addr = {handle.getRawPacket()},
                                    .length = {packet_manager_.mtuSize()},
                                    .lkey = {local_arena_lkey_}};
-    return endpoint_store.postReceiveRequest({request});
+    return endpoint_store.postReceiveRequest({request}, index);
 }
 
 int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {

@@ -27,8 +27,9 @@ int RdmaUDEndPoint::postSendRequest(
         LOG(ERROR) << "Failed to post send request: not connected";
         return -1;
     }
-    auto remote_qpn = peer_qp_num_list_[lrand48() % peer_qp_num_list_.size()];
+    auto peer_qp_index = lrand48() % peer_qp_num_list_.size();
     auto qp_index = lrand48() % store_.qpNum().size();
+    auto remote_qpn = peer_qp_num_list_[peer_qp_index];
     return store_.postSendRequest(request_list, ah_, remote_qpn, qp_index);
 }
 

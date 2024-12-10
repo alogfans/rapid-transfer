@@ -105,6 +105,7 @@ class Context {
 
     const static size_t kNumReceiveHandles = 128;
     std::vector<PacketHandle> recv_handles_;
+    std::unordered_map<void *, int> recv_handles_qp_index_map_;
 
     struct Stats {
         Stats() : send_packets(0), recv_packets(0), ack_packets(0) {}
