@@ -70,7 +70,7 @@ int Controller::deconstruct() {
     return 0;
 }
 
-int Controller::registerMcastNode(const std::string &multicast_addr) {
+int Controller::joinMulticast(const std::string &multicast_addr) {
     if (multicast_context_map_.count(multicast_addr)) {
         LOG(ERROR) << "multicast address " << multicast_addr << " registered";
         return -1;
@@ -81,7 +81,7 @@ int Controller::registerMcastNode(const std::string &multicast_addr) {
     return 0;
 }
 
-int Controller::unregisterMcastNode(const std::string &multicast_addr) {
+int Controller::leaveMulticast(const std::string &multicast_addr) {
     if (!multicast_context_map_.count(multicast_addr)) {
         LOG(ERROR) << "multicast address " << multicast_addr
                    << " not registered";
@@ -93,7 +93,7 @@ int Controller::unregisterMcastNode(const std::string &multicast_addr) {
     return ret;
 }
 
-std::shared_ptr<RdmaMulticastContext> Controller::queryMcastNode(
+std::shared_ptr<RdmaMulticastContext> Controller::queryMulticast(
     const std::string &multicast_addr) {
     if (!multicast_context_map_.count(multicast_addr)) return nullptr;
     auto context = multicast_context_map_[multicast_addr];

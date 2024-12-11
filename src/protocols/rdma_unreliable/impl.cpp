@@ -83,6 +83,19 @@ int RdmaUnreliableProtocol::unregisterLocalMemory(void *addr) {
     return context_.unregisterLocalMemory(addr);
 }
 
+int RdmaUnreliableProtocol::joinMulticast(const std::string &multicast_addr) {
+    return context_.joinMulticast(multicast_addr);
+}
+
+int RdmaUnreliableProtocol::leaveMulticast(const std::string &multicast_addr) {
+    return context_.leaveMulticast(multicast_addr);
+}
+
+int RdmaUnreliableProtocol::setMulticastPeers(const std::string &multicast_addr, 
+                                              const std::vector<std::string> &peer_name_list) {
+    return context_.setMulticastPeers(multicast_addr, peer_name_list);
+}
+
 int RdmaUnreliableProtocol::doEventLoop(int64_t timeout) {
     if (lrand48() % 8) return 0;  // drop requests
     do {

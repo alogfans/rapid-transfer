@@ -52,11 +52,11 @@ class Controller {
 
     int deconstruct();
 
-    int registerMcastNode(const std::string &multicast_addr);
+    int joinMulticast(const std::string &multicast_addr);
 
-    int unregisterMcastNode(const std::string &multicast_addr);
+    int leaveMulticast(const std::string &multicast_addr);
 
-    std::shared_ptr<RdmaMulticastContext> queryMcastNode(
+    std::shared_ptr<RdmaMulticastContext> queryMulticast(
         const std::string &multicast_addr);
 
     int prepareConnection(const std::string &peer_addr, Attributes &local);

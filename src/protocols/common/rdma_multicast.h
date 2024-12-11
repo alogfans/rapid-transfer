@@ -24,14 +24,15 @@ class RdmaMulticastContext {
         size_t max_inline_bytes;
         size_t max_cqe_count;
     };
-    
+
    public:
     RdmaMulticastContext();
 
     ~RdmaMulticastContext();
 
     /* local_addr must be bond with IB device! */
-    int construct(const std::string &local_addr, const std::string &multicast_addr);
+    int construct(const std::string &local_addr,
+                  const std::string &multicast_addr);
 
     int deconstruct();
 
@@ -42,6 +43,12 @@ class RdmaMulticastContext {
     std::pair<uint32_t, uint32_t> key(void *addr, int conn_index = 0);
 
     const Config &config() const { return config_; }
+
+    void setPeers(const std::vector<std::string> &peer_list) {
+        peer_list_ = peer_list;
+    }
+
+    const std::vector<std::string> getPeers() const { return peer_list_; }
 
    public:
     int postSendRequest(const std::vector<Request *> &request_list,
@@ -100,6 +107,8 @@ class RdmaMulticastContext {
 
     std::function<int(ibv_qp *)> on_init_qp_hook_;
     Config config_;
+
+    std::vector<std::string> peer_list_;
 };
 }  // namespace rapid
 

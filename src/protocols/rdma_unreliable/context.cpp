@@ -55,12 +55,23 @@ int Context::deconstruct() {
     return 0;
 }
 
-int Context::registerMcastNode(const std::string &multicast_addr) {
-    return controller_.registerMcastNode(multicast_addr);
+int Context::joinMulticast(const std::string &multicast_addr) {
+    return controller_.joinMulticast(multicast_addr);
 }
 
-int Context::unregisterMcastNode(const std::string &multicast_addr) {
-    return controller_.unregisterMcastNode(multicast_addr);
+int Context::leaveMulticast(const std::string &multicast_addr) {
+    return controller_.leaveMulticast(multicast_addr);
+}
+
+int Context::setMulticastPeers(const std::string &multicast_addr,
+                               const std::vector<std::string> &peer_name_list) {
+    auto context = controller_.queryMulticast(multicast_addr);
+    if (!context) {
+        LOG(INFO) << "multicast address not available";
+        return -1;
+    }
+    context->setPeers(peer_name_list);
+    return 0;
 }
 
 int Context::runStep() {
@@ -264,7 +275,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
                     auto request_list_len = request_list.size();
                     endpoint->postSendRequest(request_list);
                     session.second.send_packets += request_list_len;
-                    stats_.send_packets.fetch_add(request_list_len, 
+                    stats_.send_packets.fetch_add(request_list_len,
                                                   std::memory_order_relaxed);
                     request_list.clear();
                 }
@@ -274,9 +285,9 @@ int Context::sendDataPackets(uint64_t current_ts) {
         if (request_list_len) {
             endpoint->postSendRequest(request_list);
             session.second.send_packets += request_list_len;
-            stats_.send_packets.fetch_add(request_list_len, 
+            stats_.send_packets.fetch_add(request_list_len,
                                           std::memory_order_relaxed);
-        }            
+        }
     }
     return 0;
 }
