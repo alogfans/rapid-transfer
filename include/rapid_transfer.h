@@ -53,6 +53,13 @@ class RapidTransfer {
 
     virtual ~RapidTransfer();
 
+    int joinMulticast(const std::string &multicast_addr);
+
+    int leaveMulticast(const std::string &multicast_addr);
+
+    int setMulticastReplicas(const std::string &multicast_addr,
+                             const std::vector<std::string> &peer_name_list);
+
     // Start an asynchronous file transfer task
     // - peer_name: Hostname of target servers to transfer file
     // - buffer_list: List of memory buffers, representing the content of

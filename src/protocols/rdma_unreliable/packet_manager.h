@@ -186,6 +186,49 @@ class SendQueue {
     RWSpinlock queue_lock_;
 };
 
+class McastSendQueue {
+   public:
+    McastSendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
+                   PacketBufferPool &pool, uint8_t session, size_t replica_num);
+
+    ~McastSendQueue();
+
+    int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
+
+    int markCompleted(int index, uint32_t ack_sn);
+
+    uint32_t getNextSN() const { return SHORT_SN(head_); }
+
+    uint32_t getAckSN(int index = -1) const;
+
+    int getIndexRange(uint64_t &head, uint64_t &tail);
+
+    int forEach(std::function<int(PacketHandle &)> func);
+
+    void setWndSize(uint16_t wnd_size) {
+        wnd_size_ = std::min(wnd_size, (uint16_t)queue_capacity_);
+    }
+
+    uint16_t getWndSize() const { return wnd_size_; }
+
+   private:
+    int fillPrimaryQueue();
+
+    uint64_t getMinTailIndex() const;
+
+   private:
+    const size_t mtu_size_, queue_capacity_;
+    const uint8_t session_;
+    const size_t replica_num_;
+    uint64_t head_;
+    std::vector<uint64_t> tail_list_;
+    uint16_t wnd_size_;
+    std::vector<PacketHandle> handle_;
+    PacketBufferPool &pool_;
+    SecondaryQueue secondary_queue_;
+    RWSpinlock queue_lock_;
+};
+
 class ReceiveQueue {
    public:
     ReceiveQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
@@ -232,9 +275,7 @@ class PacketManager {
    public:
     const static size_t kWndSize = 256;
 
-    PacketManager(size_t mtu_size,
-                  size_t max_packets,
-                  size_t queue_capacity,
+    PacketManager(size_t mtu_size, size_t max_packets, size_t queue_capacity,
                   size_t wnd_size = kWndSize);
 
     ~PacketManager();
@@ -252,7 +293,11 @@ class PacketManager {
 
     ReceiveQueue &getReceiveQueue(int sid);
 
+    McastSendQueue &getMcastSendQueue(int sid);
+
     size_t mtuSize() const { return mtu_size_; }
+
+    int setMulticastReplicaNum(int group_id, size_t replica_num);
 
    private:
     const size_t mtu_size_, max_packets_, queue_capacity_, wnd_size_;
@@ -260,6 +305,8 @@ class PacketManager {
     PacketBufferPool pool_;
     std::unordered_map<int, SendQueue *> send_queue_;
     std::unordered_map<int, ReceiveQueue *> receive_queue_;
+    std::unordered_map<int, McastSendQueue *> mcast_send_queue_;
+    std::unordered_map<int, int> mcast_replica_num_;
 };
 
 }  // namespace rapid

@@ -12,7 +12,7 @@
 
 namespace rapid {
 RdmaUnreliableProtocol::RdmaUnreliableProtocol(size_t mtu_size,
-                                               size_t max_packets, 
+                                               size_t max_packets,
                                                size_t queue_capacity,
                                                bool spawn_worker)
     : context_(mtu_size, max_packets, queue_capacity),
@@ -60,7 +60,7 @@ int RdmaUnreliableProtocol::freeTask(TaskID task_id) {
 
 TaskID RdmaUnreliableProtocol::send(const std::string &peer_name,
                                     const std::vector<Buffer> &buffer_list) {
-    return context_.send(peer_name, buffer_list, false);
+    return context_.send(peer_name, buffer_list);
 }
 
 TaskID RdmaUnreliableProtocol::receive(const std::string &peer_name,
@@ -84,16 +84,32 @@ int RdmaUnreliableProtocol::unregisterLocalMemory(void *addr) {
 }
 
 int RdmaUnreliableProtocol::joinMulticast(const std::string &multicast_addr) {
+#ifdef CONFIG_MCAST
     return context_.joinMulticast(multicast_addr);
+#else
+    LOG(ERROR) << "not implemented";
+    return -1;
+#endif 
 }
 
 int RdmaUnreliableProtocol::leaveMulticast(const std::string &multicast_addr) {
+#ifdef CONFIG_MCAST
     return context_.leaveMulticast(multicast_addr);
+#else
+    LOG(ERROR) << "not implemented";
+    return -1;
+#endif 
 }
 
-int RdmaUnreliableProtocol::setMulticastPeers(const std::string &multicast_addr, 
-                                              const std::vector<std::string> &peer_name_list) {
-    return context_.setMulticastPeers(multicast_addr, peer_name_list);
+int RdmaUnreliableProtocol::setMulticastReplicas(
+    const std::string &multicast_addr,
+    const std::vector<std::string> &peer_name_list) {
+#ifdef CONFIG_MCAST
+    return context_.setMulticastReplicas(multicast_addr, peer_name_list);
+#else
+    LOG(ERROR) << "not implemented";
+    return -1;
+#endif 
 }
 
 int RdmaUnreliableProtocol::doEventLoop(int64_t timeout) {

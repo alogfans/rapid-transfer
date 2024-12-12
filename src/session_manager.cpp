@@ -284,6 +284,21 @@ int SessionManager::connect(const std::string &address,
     return sendRPC(conn_fd, request, response);
 }
 
+bool SessionManager::isMulticastAddress(const std::string &address) {
+    if (address.find(":") != address.npos)
+        return false;
+    std::istringstream iss(address);
+    std::string token;
+    std::vector<int> bytes;
+    while (std::getline(iss, token, '.')) {
+        bytes.push_back(std::stoi(token));
+    }
+    if (bytes.size() != 4) {
+        return false;
+    }
+    return bytes[0] >= 224 && bytes[0] <= 239;
+}
+
 int SessionManager::makeConnect(const std::string &address) {
     struct addrinfo hints;
     struct addrinfo *result, *addr;

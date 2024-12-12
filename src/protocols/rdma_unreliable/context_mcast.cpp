@@ -1,6 +1,6 @@
 // Copyright 2024 Feng Ren
 
-#include "context.h"
+#include "context_mcast.h"
 
 #include "protocols/common/rdma_ud_endpoint.h"
 
@@ -11,15 +11,16 @@ static inline uint64_t GetCurrentTS() {
     return (tv_now.tv_sec * 1000000 + tv_now.tv_usec);
 }
 
-Context::Context(size_t mtu_size, size_t max_packets, size_t queue_capacity)
+ContextMcast::ContextMcast(size_t mtu_size, size_t max_packets,
+                           size_t queue_capacity)
     : mtu_size_(mtu_size),
       packet_manager_(mtu_size, max_packets, queue_capacity),
       next_task_id_(0) {}
 
-Context::~Context() {}
+ContextMcast::~ContextMcast() {}
 
-int Context::construct(const std::string &device_name, uint8_t rdma_port,
-                       int gid_index) {
+int ContextMcast::construct(const std::string &device_name, uint8_t rdma_port,
+                            int gid_index) {
     int ret = 0;
     ret = controller_.construct(device_name, rdma_port, gid_index);
     if (ret < 0) return ret;
@@ -46,7 +47,7 @@ int Context::construct(const std::string &device_name, uint8_t rdma_port,
     return 0;
 }
 
-int Context::deconstruct() {
+int ContextMcast::deconstruct() {
     active_session_map_.clear();
     controller_.context().unregisterMemoryRegion(
         packet_manager_.getPool().getArena());
@@ -55,11 +56,67 @@ int Context::deconstruct() {
     return 0;
 }
 
-int Context::runStep() {
+int ContextMcast::joinMulticast(const std::string &multicast_addr) {
+    int ret = controller_.joinMulticast(multicast_addr);
+    if (ret) return ret;
+    auto &recv_handles = multicast_recv_info_map_[multicast_addr].recv_handles;
+    auto &pool = packet_manager_.getPool();
+    recv_handles.resize(kNumReceiveHandles);
+    void *arena_base = pool.getArena();
+    size_t arena_capacity = pool.getCapacity();
+    auto context = controller_.getMulticastContext(multicast_addr);
+    ret = context->registerMemoryRegion(arena_base, arena_capacity,
+                                        IBV_ACCESS_LOCAL_WRITE);
+    if (ret) return ret;
+    for (size_t i = 0; i < recv_handles.size(); ++i) {
+        ret = pool.allocatePacket(recv_handles[i], true);
+        if (ret < 0) return ret;
+        ret = submitMulticastRecvWR(multicast_addr, recv_handles[i]);
+        if (ret < 0) return ret;
+        auto index = 0;
+        recv_handles_qp_index_map_[recv_handles[i].getRawPacket()] = index;
+    }
+    return 0;
+}
+
+int ContextMcast::leaveMulticast(const std::string &multicast_addr) {
+    auto &pool = packet_manager_.getPool();
+    auto context = controller_.getMulticastContext(multicast_addr);
+    context->unregisterMemoryRegion(pool.getArena());
+    if (multicast_recv_info_map_.count(multicast_addr)) {
+        auto &recv_handles =
+            multicast_recv_info_map_[multicast_addr].recv_handles;
+        for (size_t i = 0; i < recv_handles.size(); ++i)
+            pool.freePacket(recv_handles[i]);
+        multicast_recv_info_map_.erase(multicast_addr);
+    }
+    return controller_.leaveMulticast(multicast_addr);
+}
+
+int ContextMcast::setMulticastReplicas(
+    const std::string &multicast_addr,
+    const std::vector<std::string> &peer_name_list) {
+    auto context = controller_.getMulticastContext(multicast_addr);
+    if (!context) {
+        LOG(INFO) << "multicast address not available";
+        return -1;
+    }
+    context->setReplicas(peer_name_list);
+    return packet_manager_.setMulticastReplicaNum(context->groupId(),
+                                                  peer_name_list.size());
+}
+
+int ContextMcast::runStep() {
     uint64_t current_ts = GetCurrentTS();
 
     int ret = pollCompletedPackets(RECV_CQ, current_ts);
     if (ret < 0) return ret;
+
+    // for receiver side
+    for (auto &entry : controller_.getMulticastContextMap()) {
+        ret = pollMcastCompletedPackets(entry.second, current_ts);
+        if (ret < 0) return ret;
+    }
 
     sendAckPackets(current_ts);
 
@@ -88,28 +145,35 @@ int Context::runStep() {
     return 0;
 }
 
-TaskID Context::send(const std::string &peer_name,
-                     const std::vector<Buffer> &buffer_list) {
-    int session = controller_.findSession(peer_name, 0);
-    if (session < 0) {
-        LOG(ERROR) << "cannot assign session id";
+TaskID ContextMcast::send(const std::string &peer_name,
+                          const std::vector<Buffer> &buffer_list) {
+    auto context = controller_.getMulticastContext(peer_name);
+    if (!context) {
+        LOG(ERROR) << "peer_name should be valid multicast address";
         return -1;
     }
+    int session = controller_.findSession(peer_name, 0);
+    assert(session >= 0);
     if (!active_session_map_.count(session)) {
         int ret = packet_manager_.getPool().allocatePacket(
             active_session_map_[session].ack_handle);
         if (ret) return ret;
     }
     uint32_t last_sn;
-    int ret = packet_manager_.getSendQueue(session).push(buffer_list, last_sn);
+    auto &queue = packet_manager_.getMcastSendQueue(session);
+    int ret = queue.push(buffer_list, last_sn);
     if (ret) return ret;
     int task_id = next_task_id_.fetch_add(1);
     task_map_[task_id] = Task{session, last_sn, true};
     return task_id;
 }
 
-TaskID Context::receive(const std::string &peer_name,
-                        const std::vector<Buffer> &buffer_list) {
+TaskID ContextMcast::receive(const std::string &peer_name,
+                             const std::vector<Buffer> &buffer_list) {
+    if (controller_.getMulticastContext(peer_name)) {
+        LOG(ERROR) << "peer_name should be valid device address";
+        return -1;
+    }
     int session = controller_.findSession(peer_name, 0);
     if (session < 0) {
         LOG(ERROR) << "cannot assign session id";
@@ -129,11 +193,11 @@ TaskID Context::receive(const std::string &peer_name,
     return task_id;
 }
 
-Status Context::getStatus(TaskID task_id, size_t *transferred_bytes) {
+Status ContextMcast::getStatus(TaskID task_id, size_t *transferred_bytes) {
     if (!task_map_.count(task_id)) return Status::UNKNOWN;
     auto &task = task_map_[task_id];
     if (task.is_send) {
-        auto &queue = packet_manager_.getSendQueue(task.session);
+        auto &queue = packet_manager_.getMcastSendQueue(task.session);
         if (queue.getAckSN() >= task.last_sn) {
             return Status::SUCCESS;
         }
@@ -146,32 +210,45 @@ Status Context::getStatus(TaskID task_id, size_t *transferred_bytes) {
     return Status::PENDING;
 }
 
-int Context::freeTask(TaskID task_id) {
+int ContextMcast::freeTask(TaskID task_id) {
     if (!task_map_.count(task_id)) return -1;
     task_map_.erase(task_id);
     return 0;
 }
 
-int Context::prepareConnection(const std::string &peer_addr,
-                               Attributes &local) {
+int ContextMcast::prepareConnection(const std::string &peer_addr,
+                                    Attributes &local) {
     return controller_.prepareConnection(peer_addr, local);
 }
 
-int Context::setupConnection(const std::string &peer_addr,
-                             const Attributes &peer) {
+int ContextMcast::setupConnection(const std::string &peer_addr,
+                                  const Attributes &peer) {
     return controller_.setupConnection(peer_addr, peer);
 }
 
-int Context::registerLocalMemory(void *addr, size_t length) {
-    return controller_.context().registerMemoryRegion(addr, length,
-                                                      IBV_ACCESS_LOCAL_WRITE);
+int ContextMcast::registerLocalMemory(void *addr, size_t length) {
+    int ret = controller_.context().registerMemoryRegion(
+        addr, length, IBV_ACCESS_LOCAL_WRITE);
+    if (ret) return ret;
+    auto &context_map = controller_.getMulticastContextMap();
+    for (auto &entry : context_map) {
+        ret = entry.second->registerMemoryRegion(addr, length,
+                                                 IBV_ACCESS_LOCAL_WRITE);
+        if (ret) return ret;
+    }
+    return 0;
 }
 
-int Context::unregisterLocalMemory(void *addr) {
-    return controller_.context().unregisterMemoryRegion(addr);
+int ContextMcast::unregisterLocalMemory(void *addr) {
+    controller_.context().unregisterMemoryRegion(addr);
+    auto &context_map = controller_.getMulticastContextMap();
+    for (auto &entry : context_map) {
+        entry.second->unregisterMemoryRegion(addr);
+    }
+    return 0;
 }
 
-int Context::submitNormalRecvWR(PacketHandle &handle) {
+int ContextMcast::submitNormalRecvWR(PacketHandle &handle) {
     auto &endpoint_store = controller_.endpointStore();
     int index = recv_handles_qp_index_map_[handle.getRawPacket()];
     Request *request = new Request{.addr = {handle.getRawPacket()},
@@ -180,7 +257,22 @@ int Context::submitNormalRecvWR(PacketHandle &handle) {
     return endpoint_store.postReceiveRequest({request}, index);
 }
 
-int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
+int ContextMcast::submitMulticastRecvWR(const std::string &multicast_addr,
+                                        PacketHandle &handle) {
+    auto context = controller_.getMulticastContext(multicast_addr);
+    if (!context) {
+        LOG(ERROR) << "invalid multicast address";
+        return -1;
+    }
+    int index = recv_handles_qp_index_map_[handle.getRawPacket()];
+    Request *request =
+        new Request{.addr = {handle.getRawPacket()},
+                    .length = {packet_manager_.mtuSize()},
+                    .lkey = {context->key(handle.getRawPacket()).first}};
+    return context->postReceiveRequest({request}, index);
+}
+
+int ContextMcast::pollCompletedPackets(int cq_index, uint64_t current_ts) {
     const static size_t kPollCount = 64;
     ibv_wc wc[kPollCount];
     int nr_poll = controller_.context().poll(kPollCount, wc, cq_index);
@@ -215,13 +307,51 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
     return nr_poll;
 }
 
-int Context::sendDataPackets(uint64_t current_ts) {
-    auto &context = controller_.context();
+int ContextMcast::pollMcastCompletedPackets(
+    std::shared_ptr<RdmaMulticastContext> context, uint64_t current_ts) {
+    int total_nr_poll = 0;
+    for (int conn_id = 0; conn_id < (int)context->config().num_qp_per_endpoint;
+         ++conn_id) {
+        const static size_t kPollCount = 64;
+        ibv_wc wc[kPollCount];
+        int nr_poll = context->poll(kPollCount, wc, conn_id);
+        if (nr_poll < 0) {
+            LOG(ERROR) << "worker: failed to poll completion queues";
+            return -1;
+        }
+        for (int i = 0; i < nr_poll; ++i) {
+            auto request = (Request *)wc[i].wr_id;
+            __sync_fetch_and_sub(request->qp_depth, 1);
+            if (wc[i].status != IBV_WC_SUCCESS) {
+                LOG(ERROR) << "worker: process failed for slice (addr: "
+                           << request->addr[0] << "+" << request->addr[1]
+                           << ", length: " << request->length[0] << "+"
+                           << request->length[1]
+                           << ", lkey: " << request->lkey[0] << "+"
+                           << request->lkey[1] << ", local_nic: "
+                           << controller_.context().deviceName()
+                           << "): " << ibv_wc_status_str(wc[i].status);
+                abort();  // fuse
+                continue;
+            }
+            int rc = processReceivedPacket(current_ts, wc[i],
+                                           context->multicastAddress());
+            if (rc < 0) {
+                LOG(ERROR) << "Process received packet failed";
+            }
+            delete request;
+        }
+        total_nr_poll += nr_poll;
+    }
+    return total_nr_poll;
+}
+
+int ContextMcast::sendDataPackets(uint64_t current_ts) {
     for (auto session : active_session_map_) {
-        auto endpoint = controller_.getOrCreateEndpoint(session.first);
-        if (!endpoint) return -1;
+        auto context = controller_.getMulticastContext(session.first);
+        if (!context) continue;
         std::vector<Request *> request_list;
-        packet_manager_.getSendQueue(session.first)
+        packet_manager_.getMcastSendQueue(session.first)
             .forEach([&](PacketHandle &handle) -> int {
                 if (current_ts - handle.ts < recv_rto_) return 0;
                 if (handle.ts) {
@@ -229,7 +359,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
                         std::max(kMinSSThreshValue, session.second.cwnd / 2);
                     session.second.cwnd = 1;
                     session.second.incr = mtu_size_;
-                    packet_manager_.getSendQueue(session.first)
+                    packet_manager_.getMcastSendQueue(session.first)
                         .setWndSize(session.second.cwnd);
                 }
                 handle.ts = current_ts;
@@ -237,24 +367,26 @@ int Context::sendDataPackets(uint64_t current_ts) {
                 uint32_t imm_data;
                 if (handle.serialize(slices, imm_data)) return -1;
                 Request *request = nullptr;
+                LOG(INFO) << "send data ... sn = " << handle.sn;
                 if (slices.size() == 1)
-                    request = new Request{.addr = {slices[0].addr},
-                                          .length = {slices[0].length},
-                                          .lkey = {local_arena_lkey_},
-                                          .imm_data = imm_data};
+                    request = new Request{
+                        .addr = {slices[0].addr},
+                        .length = {slices[0].length},
+                        .lkey = {context->key(slices[0].addr).first},
+                        .imm_data = imm_data};
                 else if (slices.size() == 2)
                     request = new Request{
                         .addr = {slices[0].addr, slices[1].addr},
                         .length = {slices[0].length, slices[1].length},
-                        .lkey = {local_arena_lkey_,
-                                 context.key(slices[1].addr).first},
+                        .lkey = {context->key(slices[0].addr).first,
+                                 context->key(slices[1].addr).first},
                         .imm_data = imm_data};
                 else
                     return -1;
                 request_list.push_back(request);
                 if (request_list.size() == 4) {
                     auto request_list_len = request_list.size();
-                    endpoint->postSendRequest(request_list);
+                    context->postSendRequest(request_list);
                     session.second.send_packets += request_list_len;
                     stats_.send_packets.fetch_add(request_list_len,
                                                   std::memory_order_relaxed);
@@ -264,7 +396,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
             });
         auto request_list_len = request_list.size();
         if (request_list_len) {
-            endpoint->postSendRequest(request_list);
+            context->postSendRequest(request_list);
             session.second.send_packets += request_list_len;
             stats_.send_packets.fetch_add(request_list_len,
                                           std::memory_order_relaxed);
@@ -273,7 +405,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
     return 0;
 }
 
-int Context::sendAckPackets(uint64_t current_ts) {
+int ContextMcast::sendAckPackets(uint64_t current_ts) {
     for (auto &session : active_session_map_) {
         auto &queue = packet_manager_.getReceiveQueue(session.first);
         PacketHandle &handle = session.second.ack_handle;
@@ -301,6 +433,7 @@ int Context::sendAckPackets(uint64_t current_ts) {
         auto endpoint = controller_.getOrCreateEndpoint(session.first);
         if (!endpoint) return -1;
         int ret = endpoint->postSendRequest({request});
+        LOG(INFO) << "send ack ... " << handle.sn;
         if (ret != 1) return -1;
         session.second.ack_packets = session.second.recv_packets;
         stats_.ack_packets.fetch_add(1, std::memory_order_relaxed);
@@ -308,7 +441,8 @@ int Context::sendAckPackets(uint64_t current_ts) {
     return 0;
 }
 
-int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
+int ContextMcast::processReceivedPacket(uint64_t current_ts, ibv_wc &wc,
+                                        const std::string &multicast_addr) {
     Request *request = (Request *)wc.wr_id;
     if (wc.opcode == IBV_WC_SEND) {
         auto handle = (PacketHandle *)request->context;
@@ -326,34 +460,50 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
         ibv_grh *grh = (ibv_grh *)request->addr[0];
         int session =
             controller_.findSession(grh->sgid, wc.src_qp, handle.session);
+        if (session < 0 && !multicast_addr.empty()) {
+            session = controller_.findSession(multicast_addr, handle.session);
+        }
         if (session >= 0) {
             switch (handle.cmd) {
-                case PKT_CMD_DATA:
+                case PKT_CMD_DATA: {
+                    uint64_t head, tail;
+                    packet_manager_.getReceiveQueue(session).getIndexRange(
+                        head, tail);
+                    if (head == tail) break;
+                    LOG(INFO) << "recv data ... " << handle.sn;
                     packet_manager_.getReceiveQueue(session).markCompleted(
                         handle);
                     stats_.recv_packets.fetch_add(1, std::memory_order_relaxed);
                     if (active_session_map_.count(session))
                         active_session_map_[session].recv_packets++;
                     break;
+                }
                 case PKT_CMD_ACK: {
-                    packet_manager_.getSendQueue(session).markCompleted(
-                        handle.sn);
+                    LOG(INFO) << "recv ack ... " << handle.sn;
+                    session = controller_.redirectMulticast(session);
+                    packet_manager_.getMcastSendQueue(session).markCompleted(
+                        0, handle.sn);  // todo identify from index
                     auto rtt = (current_ts - handle.ts) & ((1ull << 48) - 1);
                     updateRTO(rtt);
                     updateWndOnSuccess(session, handle.wnd);
                     break;
                 }
-                default:
+                default: {
                     LOG(INFO) << "Unknown packet";
                     break;
+                }
             }
         }
-        return submitNormalRecvWR(handle);
+        if (!multicast_addr.empty()) {
+            return submitMulticastRecvWR(multicast_addr, handle);
+        } else {
+            return submitNormalRecvWR(handle);
+        }
     }
     return 0;
 }
 
-void Context::updateRTO(uint64_t rtt) {
+void ContextMcast::updateRTO(uint64_t rtt) {
     if (recv_srtt_ == 0) {
         recv_srtt_ = rtt;
         recv_rttval_ = rtt / 2;
@@ -368,7 +518,7 @@ void Context::updateRTO(uint64_t rtt) {
     recv_rto_ = std::min(std::max(kMinRTO, rto), kMaxRTO);
 }
 
-void Context::updateWndOnSuccess(int session, uint32_t rwnd) {
+void ContextMcast::updateWndOnSuccess(int session, uint32_t rwnd) {
     auto &entry = active_session_map_[session];
     if (entry.cwnd < entry.ssthresh) {
         entry.cwnd++;
@@ -380,7 +530,7 @@ void Context::updateWndOnSuccess(int session, uint32_t rwnd) {
             entry.cwnd = (entry.incr + mtu_size_ - 1) / mtu_size_;
         }
     }
-    auto &queue = packet_manager_.getSendQueue(session);
+    auto &queue = packet_manager_.getMcastSendQueue(session);
     entry.rwnd = rwnd;
     entry.cwnd = std::min(entry.rwnd, entry.cwnd);
     if (queue.getWndSize() != entry.cwnd) {

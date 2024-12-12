@@ -56,7 +56,7 @@ class Controller {
 
     int leaveMulticast(const std::string &multicast_addr);
 
-    std::shared_ptr<RdmaMulticastContext> queryMulticast(
+    std::shared_ptr<RdmaMulticastContext> getMulticastContext(
         const std::string &multicast_addr);
 
     int prepareConnection(const std::string &peer_addr, Attributes &local);
@@ -68,6 +68,17 @@ class Controller {
     int findSession(const std::string &peer_addr, uint8_t session);
 
     std::shared_ptr<RdmaUDEndPoint> getOrCreateEndpoint(int session);
+
+    std::shared_ptr<RdmaMulticastContext> getMulticastContext(int session);
+
+    using MulticastContextMap =
+        std::map<std::string, std::shared_ptr<RdmaMulticastContext>>;
+
+    const MulticastContextMap &getMulticastContextMap() const {
+        return multicast_context_map_;
+    }
+
+    int redirectMulticast(int sid);
 
     RdmaContext &context() { return context_; }
 
@@ -82,8 +93,7 @@ class Controller {
     RdmaUDEndPointStore endpoint_store_;
 
     std::string local_addr_;
-    std::map<std::string, std::shared_ptr<RdmaMulticastContext>>
-        multicast_context_map_;
+    MulticastContextMap multicast_context_map_;
 
     std::unordered_map<NodeAddress, int, NodeAddressHash> node_id_map_;
     std::unordered_map<std::string, int> peer_name_map_;

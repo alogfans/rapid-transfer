@@ -39,6 +39,8 @@ class SessionManager {
 
     bool hasConnection(const std::string &address);
 
+    bool isMulticastAddress(const std::string &address);
+
    private:
     void listener();
 

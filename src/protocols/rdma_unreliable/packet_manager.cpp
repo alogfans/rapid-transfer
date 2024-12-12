@@ -285,6 +285,105 @@ int SendQueue::forEach(std::function<int(PacketHandle &)> func) {
     return 0;
 }
 
+McastSendQueue::McastSendQueue(size_t mtu_size, size_t queue_capacity,
+                               size_t wnd_size, PacketBufferPool &pool,
+                               uint8_t session, size_t replica_num)
+    : mtu_size_(mtu_size),
+      queue_capacity_(queue_capacity),
+      session_(session),
+      replica_num_(replica_num),
+      head_(0),
+      wnd_size_(wnd_size),
+      pool_(pool),
+      secondary_queue_(mtu_size - sizeof(PktHdr) - kGRHSize) {
+    assert(wnd_size <= queue_capacity);
+    handle_.resize(queue_capacity);
+    tail_list_.resize(replica_num, 0);
+}
+
+McastSendQueue::~McastSendQueue() {
+    for (auto &entry : handle_) {
+        if (entry.getPayload()) {
+            pool_.freePacket(entry);
+        }
+    }
+    handle_.clear();
+}
+
+int McastSendQueue::push(const std::vector<Buffer> &slice_list,
+                         uint32_t &last_sn) {
+    RWSpinlock::WriteGuard guard(queue_lock_);
+    auto fragment_id = secondary_queue_.push(slice_list);
+    last_sn = SHORT_SN(fragment_id.second);
+    return fillPrimaryQueue();
+}
+
+int McastSendQueue::markCompleted(int index, uint32_t ack_sn) {
+    RWSpinlock::WriteGuard guard(queue_lock_);
+    // case 1: XXX tail_ ... ack_sn ... head_ XXX
+    // case 2: ... ack_sn ... head  XXX tail ...
+    if (index < 0 || index >= (int)tail_list_.size()) {
+        LOG(ERROR) << "invalid argument";
+        return -1;
+    }
+    auto &tail_ = tail_list_[index];
+    auto tail = SHORT_SN(tail_), head = SHORT_SN(head_);
+    if (tail <= head && tail <= ack_sn && ack_sn <= head)
+        tail_ = tail_ + (ack_sn - tail);
+    else if (tail > head && ack_sn <= head)
+        tail_ = head_ - (head - ack_sn);
+    else if (tail > head && ack_sn >= tail)
+        tail_ = tail_ + (ack_sn - tail);
+    return fillPrimaryQueue();
+}
+
+uint32_t McastSendQueue::getAckSN(int index) const {
+    if (index < 0 || index >= (int)tail_list_.size())
+        return SHORT_SN(getMinTailIndex());
+    return SHORT_SN(tail_list_[index]);
+}
+
+int McastSendQueue::fillPrimaryQueue() {
+    // including wrap-ups
+    while (secondary_queue_.hasRemainingFragment() &&
+           head_ - getMinTailIndex() <= wnd_size_) {
+        auto slice = secondary_queue_.popFragment();
+        auto &handle = handle_[head_ % queue_capacity_];
+        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return -1;
+        handle.session = session_;
+        handle.cmd = PKT_CMD_DATA;
+        handle.wnd = wnd_size_;
+        handle.sn = SHORT_SN(head_);
+        handle.ts = 0;
+        if (handle.setPayload(slice.addr, slice.length, false)) return -1;
+        handle.inflight = true;
+        head_++;
+    }
+    return 0;
+}
+
+int McastSendQueue::getIndexRange(uint64_t &head, uint64_t &tail) {
+    RWSpinlock::ReadGuard guard(queue_lock_);
+    head = head_;
+    tail = getMinTailIndex();
+    return 0;
+}
+
+int McastSendQueue::forEach(std::function<int(PacketHandle &)> func) {
+    RWSpinlock::ReadGuard guard(queue_lock_);
+    for (auto curr = getMinTailIndex(); curr != head_; curr++) {
+        auto &handle = handle_[curr % queue_capacity_];
+        func(handle);
+    }
+    return 0;
+}
+
+uint64_t McastSendQueue::getMinTailIndex() const {
+    uint64_t min_tail = UINT64_MAX;
+    for (auto &entry : tail_list_) min_tail = std::min(min_tail, entry);
+    return min_tail;
+}
+
 ReceiveQueue::ReceiveQueue(size_t mtu_size, size_t queue_capacity,
                            size_t wnd_size, uint8_t session)
     : mtu_size_(mtu_size),
@@ -412,6 +511,38 @@ ReceiveQueue &PacketManager::getReceiveQueue(int sid) {
     auto &entry = receive_queue_[sid];
     queue_lock_.unlock();
     return *entry;
+}
+
+McastSendQueue &PacketManager::getMcastSendQueue(int sid) {
+    queue_lock_.lockShared();
+    if (mcast_send_queue_.count(sid)) {
+        auto &entry = mcast_send_queue_[sid];
+        queue_lock_.unlockShared();
+        return *entry;
+    }
+    queue_lock_.unlockShared();
+    queue_lock_.lock();
+    if (!mcast_send_queue_.count(sid)) {
+        LOG(INFO) << sid / 256 << " " << mcast_replica_num_[sid / 256];
+        auto entry =
+            new McastSendQueue(mtu_size_, queue_capacity_, wnd_size_, pool_,
+                               sid % 256, mcast_replica_num_[sid / 256]);
+        mcast_send_queue_[sid] = entry;
+    }
+    auto &entry = mcast_send_queue_[sid];
+    queue_lock_.unlock();
+    return *entry;
+}
+
+int PacketManager::setMulticastReplicaNum(int group_id, size_t replica_num) {
+    queue_lock_.lock();
+    if (mcast_replica_num_.count(group_id)) {
+        queue_lock_.unlock();
+        return -1;
+    }
+    mcast_replica_num_[group_id] = replica_num;
+    queue_lock_.unlock();
+    return 0;
 }
 
 }  // namespace rapid

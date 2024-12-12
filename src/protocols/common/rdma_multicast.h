@@ -42,13 +42,23 @@ class RdmaMulticastContext {
 
     std::pair<uint32_t, uint32_t> key(void *addr, int conn_index = 0);
 
+    std::vector<uint32_t> qpNum();
+
+    void qpNum(std::vector<uint32_t> &qp_num_list);
+
     const Config &config() const { return config_; }
 
-    void setPeers(const std::vector<std::string> &peer_list) {
-        peer_list_ = peer_list;
+    void setGroupId(int group_id) { group_id_ = group_id; }
+
+    int groupId() const { return group_id_; }
+
+    void setReplicas(const std::vector<std::string> &replicas) {
+        replicas_ = replicas;
     }
 
-    const std::vector<std::string> getPeers() const { return peer_list_; }
+    const std::vector<std::string> &replicas() const { return replicas_; }
+
+    const std::string multicastAddress() const { return multicast_addr_str_; }
 
    public:
     int postSendRequest(const std::vector<Request *> &request_list,
@@ -108,7 +118,9 @@ class RdmaMulticastContext {
     std::function<int(ibv_qp *)> on_init_qp_hook_;
     Config config_;
 
-    std::vector<std::string> peer_list_;
+    int group_id_;
+    std::string multicast_addr_str_;
+    std::vector<std::string> replicas_;
 };
 }  // namespace rapid
 

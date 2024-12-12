@@ -29,6 +29,8 @@ DEFINE_string(listen, ":12348", "TCP listen address");
 DEFINE_uint32(rdma_port, 1, "RDMA port");
 DEFINE_uint32(gid_index, 0, "GID Index");
 
+const static std::string kMulticastAddress = "239.0.0.1";
+
 using namespace rapid;
 
 static void *allocateMemoryPool(size_t size, int socket_id)
@@ -98,6 +100,12 @@ int receiver()
     auto engine = rapid::RapidTransfer::Create(FLAGS_protocol, FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
+    int ret = engine->joinMulticast(kMulticastAddress);
+    if (ret) {
+        LOG(ERROR) << "Failed to join multicast group";
+        return -1;
+    }
+
     const size_t dram_buffer_size = 1ull << 30;
     void *addr = allocateMemoryPool(dram_buffer_size, 0);
     if (!addr)
@@ -106,7 +114,7 @@ int receiver()
         return -1;
     }
 
-    int ret = engine->registerLocalMemory(addr, dram_buffer_size);
+    ret = engine->registerLocalMemory(addr, dram_buffer_size);
     if (ret)
     {
         LOG(ERROR) << "Failed to register memory";
@@ -217,6 +225,17 @@ int sender()
     auto engine = rapid::RapidTransfer::Create(FLAGS_protocol, FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
+    int ret = engine->joinMulticast(kMulticastAddress);
+    if (ret) {
+        LOG(ERROR) << "Failed to join multicast group";
+        return -1;
+    }
+    ret = engine->setMulticastReplicas(kMulticastAddress, {FLAGS_target});
+    if (ret) {
+        LOG(ERROR) << "Failed to join multicast group";
+        return -1;
+    }
+
     const size_t dram_buffer_size = 1ull << 30;
     void *addr = allocateMemoryPool(dram_buffer_size, 0);
     if (!addr)
@@ -225,7 +244,7 @@ int sender()
         return -1;
     }
 
-    int ret = engine->registerLocalMemory(addr, dram_buffer_size);
+    ret = engine->registerLocalMemory(addr, dram_buffer_size);
     if (ret)
     {
         LOG(ERROR) << "Failed to register memory";
@@ -281,7 +300,7 @@ int sender()
     };
 
     *(uint64_t *)addr = file_size;
-    TaskID task_id = engine->send(FLAGS_target, {{addr, sizeof(uint64_t)}});
+    TaskID task_id = engine->send(kMulticastAddress, {{addr, sizeof(uint64_t)}});
     if (wait_for_completion(task_id))
     {
         cleanup();
@@ -301,7 +320,7 @@ int sender()
             }
         }
 
-        TaskID task_id = engine->send({FLAGS_target}, {{addr, chunk_size}});
+        TaskID task_id = engine->send(kMulticastAddress, {{addr, chunk_size}});
         if (wait_for_completion(task_id))
         {
             cleanup();

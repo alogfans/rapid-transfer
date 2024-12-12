@@ -5,6 +5,7 @@
 #define PROTOCOL_H
 
 #include "rapid_transfer.h"
+#include <glog/logging.h>
 
 namespace rapid {
 enum RequestType { SEND, RECEIVE };
@@ -19,6 +20,22 @@ struct Protocol {
                           int gid_index) = 0;
 
     virtual int deconstruct() = 0;
+
+    virtual int joinMulticast(const std::string &multicast_addr) {
+        LOG(INFO) << "not implemented";
+        return -1;
+    }
+
+    virtual int leaveMulticast(const std::string &multicast_addr) {
+        LOG(INFO) << "not implemented";
+        return -1;
+    }
+
+    virtual int setMulticastReplicas(const std::string &multicast_addr,
+                                     const std::vector<std::string> &peer_name_list) {
+        LOG(INFO) << "not implemented";
+        return -1;
+    }
 
     virtual int prepareConnection(const std::string &peer_name,
                                   Attributes &local) = 0;

@@ -40,6 +40,23 @@ RapidTransfer::~RapidTransfer() {
     delete session_manager_;
 }
 
+int RapidTransfer::joinMulticast(const std::string &multicast_addr) {
+    return protocol_->joinMulticast(multicast_addr);
+}
+
+int RapidTransfer::leaveMulticast(const std::string &multicast_addr) {
+    return protocol_->leaveMulticast(multicast_addr);
+}
+
+int RapidTransfer::setMulticastReplicas(const std::string &multicast_addr,
+                                        const std::vector<std::string> &peer_name_list) {
+    for (auto &entry : peer_name_list) {
+        int ret = makeConnectionIfNeeded(entry);
+        if (ret) return ret;
+    }
+    return protocol_->setMulticastReplicas(multicast_addr, peer_name_list);
+}
+
 TaskID RapidTransfer::send(const std::string &peer_name,
                            const std::vector<Buffer> &buffer_list) {
     int ret = makeConnectionIfNeeded(peer_name);
@@ -106,6 +123,8 @@ int RapidTransfer::shutdownListener() {
 }
 
 int RapidTransfer::makeConnectionIfNeeded(const std::string &peer_name) {
+    if (session_manager_->isMulticastAddress(peer_name))
+        return 0;
     if (!session_manager_->hasConnection(peer_name)) {
         Attributes request, response;
         int ret = protocol_->prepareConnection(peer_name, request);

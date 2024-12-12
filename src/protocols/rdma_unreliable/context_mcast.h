@@ -1,7 +1,7 @@
 // Copyright 2024 Feng Ren
 
-#ifndef CONTEXT_H_
-#define CONTEXT_H_
+#ifndef CONTEXT_MCAST_H_
+#define CONTEXT_MCAST_H_
 
 #include <sys/time.h>
 
@@ -11,16 +11,23 @@
 #include "packet_manager.h"
 
 namespace rapid {
-class Context {
+class ContextMcast {
    public:
-    Context(size_t mtu_size, size_t max_packets, size_t queue_capacity);
+    ContextMcast(size_t mtu_size, size_t max_packets, size_t queue_capacity);
 
-    ~Context();
+    ~ContextMcast();
 
     int construct(const std::string &device_name, uint8_t rdma_port,
                   int gid_index);
 
     int deconstruct();
+
+    int joinMulticast(const std::string &multicast_addr);
+
+    int leaveMulticast(const std::string &multicast_addr);
+
+    int setMulticastReplicas(const std::string &multicast_addr,
+                             const std::vector<std::string> &peer_name_list);
 
     TaskID send(const std::string &peer_name,
                 const std::vector<Buffer> &buffer_list);
@@ -45,6 +52,9 @@ class Context {
    private:
     int pollCompletedPackets(int cq_index, uint64_t current_ts);
 
+    int pollMcastCompletedPackets(std::shared_ptr<RdmaMulticastContext> context,
+                                  uint64_t current_ts);
+
     int sendDataPackets(uint64_t current_ts);
 
     int sendAckPackets(uint64_t current_ts);
@@ -53,9 +63,13 @@ class Context {
 
     void updateWndOnSuccess(int session, uint32_t rwnd);
 
-    int processReceivedPacket(uint64_t current_ts, ibv_wc &wc);
+    int processReceivedPacket(uint64_t current_ts, ibv_wc &wc,
+                              const std::string &multicast_addr = "");
 
     int submitNormalRecvWR(PacketHandle &handle);
+
+    int submitMulticastRecvWR(const std::string &multicast_addr,
+                              PacketHandle &handle);
 
    private:
     struct Task {
@@ -103,6 +117,12 @@ class Context {
     std::vector<PacketHandle> recv_handles_;
     std::unordered_map<void *, int> recv_handles_qp_index_map_;
 
+    struct MulticastRecvInfo {
+        std::vector<PacketHandle> recv_handles;
+    };
+
+    std::unordered_map<std::string, MulticastRecvInfo> multicast_recv_info_map_;
+
     struct Stats {
         Stats() : send_packets(0), recv_packets(0), ack_packets(0) {}
         std::atomic<uint64_t> send_packets;
@@ -114,4 +134,4 @@ class Context {
 };
 }  // namespace rapid
 
-#endif  // CONTEXT_H_
+#endif  // CONTEXT_MCAST_H_

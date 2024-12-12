@@ -42,7 +42,8 @@ RdmaMulticastContext::RdmaMulticastContext()
       local_addr_(nullptr),
       multicast_addr_(nullptr),
       running_(false),
-      num_active_connections_(0) {
+      num_active_connections_(0),
+      group_id_(0) {
     config_.num_qp_per_endpoint = FLAGS_num_qp_per_endpoint;
     config_.max_sge_per_wr = FLAGS_max_sge_per_wr;
     config_.max_wr_per_qp = FLAGS_max_wr_per_qp;
@@ -54,6 +55,7 @@ RdmaMulticastContext::~RdmaMulticastContext() { deconstruct(); }
 
 int RdmaMulticastContext::construct(const std::string &local_addr,
                                     const std::string &multicast_addr) {
+    multicast_addr_str_ = multicast_addr;
     event_channel_ = rdma_create_event_channel();
     if (!event_channel_) {
         PLOG(ERROR) << "Failed to create event channel";
@@ -153,6 +155,13 @@ int RdmaMulticastContext::registerMemoryRegion(void *addr, size_t length,
         }
 
         connections_[i].memory_regions.push_back(mr);
+
+        LOG(INFO) << "Memory region: " << addr << " -- "
+                  << (void *)((uintptr_t)addr + length)
+                  << ", Device name: " << "N/A" << ", Length: " << length
+                  << " (" << length / 1024 / 1024 << " MB)"
+                  << ", Permission: " << access << std::hex
+                  << ", LKey: " << mr->lkey << ", RKey: " << mr->rkey;
     }
 
     return 0;
@@ -225,19 +234,36 @@ std::pair<uint32_t, uint32_t> RdmaMulticastContext::key(void *addr,
     return {0, 0};
 }
 
+std::vector<uint32_t> RdmaMulticastContext::qpNum() {
+    std::vector<uint32_t> qp_num_list;
+    qpNum(qp_num_list);
+    return qp_num_list;
+}
+
+void RdmaMulticastContext::qpNum(std::vector<uint32_t> &qp_num_list) {
+    for (auto &connection : connections_) {
+        qp_num_list.push_back(connection.cm_id->qp->qp_num);
+    }
+}
+
 int RdmaMulticastContext::postSendRequest(
     const std::vector<Request *> &request_list, int conn_index) {
     if (conn_index < 0 || conn_index >= (int)connections_.size()) return -1;
 
     auto &connection = connections_[conn_index];
-    int wr_count = std::min((int)config_.max_wr_per_qp - connection.send_wr_depth,
-                            (int)request_list.size());
+    int wr_count =
+        std::min((int)config_.max_wr_per_qp - connection.send_wr_depth,
+                 (int)request_list.size());
     if (wr_count == 0) return 0;
 
     ibv_sge sge_list[kMaxSgeCount * wr_count];
-    int actual_sge_count = 0;
+    ibv_send_wr wr_list[wr_count], *bad_wr = nullptr;
+    memset(wr_list, 0, sizeof(ibv_send_wr) * wr_count);
     for (int i = 0; i < wr_count; ++i) {
+        int actual_sge_count = 0;
+        size_t actual_length = 0;
         auto &request = request_list[i];
+        auto &wr = wr_list[i];
         for (int j = 0; j < kMaxSgeCount; j++) {
             if (!request->addr[j]) break;
             auto &sge = sge_list[i * kMaxSgeCount + j];
@@ -245,19 +271,16 @@ int RdmaMulticastContext::postSendRequest(
             sge.length = request->length[j];
             sge.lkey = request->lkey[j];
             actual_sge_count++;
+            actual_length += sge.length;
         }
-    }
-
-    ibv_send_wr wr_list[wr_count], *bad_wr = nullptr;
-    memset(wr_list, 0, sizeof(ibv_send_wr) * wr_count);
-    for (int i = 0; i < wr_count; ++i) {
-        auto &request = request_list[i];
-        auto &wr = wr_list[i];
         wr.wr_id = (uint64_t)request;
-        wr.opcode = IBV_WR_SEND;
+        wr.opcode = request->imm_data ? IBV_WR_SEND_WITH_IMM : IBV_WR_SEND;
+        wr.imm_data = request->imm_data;
         wr.num_sge = actual_sge_count;
         wr.sg_list = &sge_list[i * kMaxSgeCount];
         wr.send_flags = IBV_SEND_SIGNALED;
+        if (actual_length < config_.max_inline_bytes)
+            wr.send_flags |= IBV_SEND_INLINE;
         wr.next = (i + 1 == wr_count) ? nullptr : &wr_list[i + 1];
         wr.wr.ud.ah = connection.ah;
         wr.wr.ud.remote_qkey = connection.remote_qkey;
@@ -267,7 +290,8 @@ int RdmaMulticastContext::postSendRequest(
     __sync_fetch_and_add(&connection.send_wr_depth, wr_count);
     int rc = ibv_post_send(connection.cm_id->qp, wr_list, &bad_wr);
     if (rc) {
-        PLOG(ERROR) << "ibv_post_send failed";
+        PLOG(ERROR) << "ibv_post_send failed: " << rc;
+        abort();
         while (bad_wr) {
             int i = bad_wr - wr_list;
             request_list[i]->status = FAILED;
@@ -283,14 +307,18 @@ int RdmaMulticastContext::postReceiveRequest(
     if (conn_index < 0 || conn_index >= (int)connections_.size()) return -1;
 
     auto &connection = connections_[conn_index];
-    int wr_count = std::min((int)config_.max_wr_per_qp - connection.recv_wr_depth,
-                            (int)request_list.size());
+    int wr_count =
+        std::min((int)config_.max_wr_per_qp - connection.recv_wr_depth,
+                 (int)request_list.size());
     if (wr_count == 0) return 0;
 
     ibv_sge sge_list[kMaxSgeCount * wr_count];
-    int actual_sge_count = 0;
+    ibv_recv_wr wr_list[wr_count], *bad_wr = nullptr;
+    memset(wr_list, 0, sizeof(ibv_recv_wr) * wr_count);
     for (int i = 0; i < wr_count; ++i) {
+        int actual_sge_count = 0;
         auto &request = request_list[i];
+        auto &wr = wr_list[i];
         for (int j = 0; j < kMaxSgeCount; j++) {
             if (!request->addr[j]) break;
             auto &sge = sge_list[i * kMaxSgeCount + j];
@@ -299,13 +327,6 @@ int RdmaMulticastContext::postReceiveRequest(
             sge.lkey = request->lkey[j];
             actual_sge_count++;
         }
-    }
-
-    ibv_recv_wr wr_list[wr_count], *bad_wr = nullptr;
-    memset(wr_list, 0, sizeof(ibv_recv_wr) * wr_count);
-    for (int i = 0; i < wr_count; ++i) {
-        auto &request = request_list[i];
-        auto &wr = wr_list[i];
         wr.wr_id = (uint64_t)request;
         wr.num_sge = actual_sge_count;
         wr.sg_list = &sge_list[i * kMaxSgeCount];
