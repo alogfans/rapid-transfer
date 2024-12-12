@@ -479,10 +479,11 @@ int ContextMcast::processReceivedPacket(uint64_t current_ts, ibv_wc &wc,
                     break;
                 }
                 case PKT_CMD_ACK: {
-                    LOG(INFO) << "recv ack ... " << handle.sn;
-                    session = controller_.redirectMulticast(session);
+                    int index = 0;
+                    session = controller_.redirectMulticast(session, index);
+                    LOG(INFO) << "recv ack ... " << session;
                     packet_manager_.getMcastSendQueue(session).markCompleted(
-                        0, handle.sn);  // todo identify from index
+                        index, handle.sn);
                     auto rtt = (current_ts - handle.ts) & ((1ull << 48) - 1);
                     updateRTO(rtt);
                     updateWndOnSuccess(session, handle.wnd);

@@ -78,7 +78,7 @@ class Controller {
         return multicast_context_map_;
     }
 
-    int redirectMulticast(int sid);
+    int redirectMulticast(int sid, int &index);
 
     RdmaContext &context() { return context_; }
 

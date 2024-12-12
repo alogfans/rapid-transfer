@@ -380,7 +380,10 @@ int McastSendQueue::forEach(std::function<int(PacketHandle &)> func) {
 
 uint64_t McastSendQueue::getMinTailIndex() const {
     uint64_t min_tail = UINT64_MAX;
-    for (auto &entry : tail_list_) min_tail = std::min(min_tail, entry);
+    for (auto &entry : tail_list_) {
+        LOG(INFO) << entry;
+        min_tail = std::min(min_tail, entry);
+    }
     return min_tail;
 }
 

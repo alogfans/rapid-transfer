@@ -95,6 +95,16 @@ static inline ssize_t readFully(int fd, void *buf, size_t len)
     return len;
 }
 
+static inline std::vector<std::string> split(const std::string &s, char delimiter) {
+    std::vector<std::string> tokens;
+    std::string token;
+    std::istringstream tokenStream(s);
+    while (std::getline(tokenStream, token, delimiter)) {
+        tokens.push_back(token);
+    }
+    return tokens;
+}
+
 int receiver()
 {
     auto engine = rapid::RapidTransfer::Create(FLAGS_protocol, FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
@@ -230,7 +240,7 @@ int sender()
         LOG(ERROR) << "Failed to join multicast group";
         return -1;
     }
-    ret = engine->setMulticastReplicas(kMulticastAddress, {FLAGS_target});
+    ret = engine->setMulticastReplicas(kMulticastAddress, split(FLAGS_target, ','));
     if (ret) {
         LOG(ERROR) << "Failed to join multicast group";
         return -1;

@@ -191,16 +191,18 @@ std::shared_ptr<RdmaMulticastContext> Controller::getMulticastContext(
         return nullptr;
 }
 
-int Controller::redirectMulticast(int sid) {
+int Controller::redirectMulticast(int sid, int &index) {
     RWSpinlock::ReadGuard guard(session_lock_);
     int node_id = sid / 256;
     int session = sid % 256;
     for (auto &entry : multicast_context_map_) {
+        index = 0;
         for (auto &replica : entry.second->replicas()) {
             if (replica == peer_name_rev_map_[node_id]) {
                 node_id = entry.second->groupId();
                 return node_id * 256 + session;
             }
+            index++;
         }
     }
     return sid;
