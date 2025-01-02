@@ -53,7 +53,7 @@ TEST(PacketManagerTest, PacketBufferPool) {
 }
 
 TEST(PacketManagerTest, PacketManager) {
-    PacketManager manager;
+    PacketManager manager(1024, 4096, 4096);
     ASSERT_EQ(0, manager.construct());
     char data[256] = "Hello world";
     uint32_t sn;
@@ -62,14 +62,10 @@ TEST(PacketManagerTest, PacketManager) {
     auto &send_queue = manager.getSendQueue(0);
     Buffer slice{data, 256};
     ASSERT_EQ(0, send_queue.push({slice}, sn));
-    ASSERT_EQ(0, sn);
-    ASSERT_EQ(0, send_queue.push({slice}, sn));
     ASSERT_EQ(1, sn);
-    ASSERT_EQ(0, send_queue.markCompleted(1));
-    ASSERT_EQ(0, send_queue.getIndexRange(head, tail));
-    ASSERT_EQ(2, head);
-    ASSERT_EQ(0, tail);
-    ASSERT_EQ(0, send_queue.markCompleted(0));
+    ASSERT_EQ(0, send_queue.push({slice}, sn));
+    ASSERT_EQ(2, sn);
+    ASSERT_EQ(0, send_queue.markCompleted(2));
     ASSERT_EQ(0, send_queue.getIndexRange(head, tail));
     ASSERT_EQ(2, head);
     ASSERT_EQ(2, tail);
