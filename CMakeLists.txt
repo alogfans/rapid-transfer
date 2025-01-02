@@ -6,6 +6,12 @@ set(CMAKE_CXX_FLAGS "-O3 -g -Wall -static-libstdc++")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(CONFIG_MCAST "option for enable multicast" OFF)
+if (CONFIG_MCAST)
+  add_compile_definitions(CONFIG_MCAST)
+  message(STATUS "multicast is enabled")
+endif()
+
 include_directories(include)
 include_directories(src)
 include_directories(/usr/include/jsoncpp)
