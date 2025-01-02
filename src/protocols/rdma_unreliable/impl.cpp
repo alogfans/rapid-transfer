@@ -89,7 +89,7 @@ int RdmaUnreliableProtocol::joinMulticast(const std::string &multicast_addr) {
 #else
     LOG(ERROR) << "not implemented";
     return -1;
-#endif 
+#endif
 }
 
 int RdmaUnreliableProtocol::leaveMulticast(const std::string &multicast_addr) {
@@ -98,7 +98,7 @@ int RdmaUnreliableProtocol::leaveMulticast(const std::string &multicast_addr) {
 #else
     LOG(ERROR) << "not implemented";
     return -1;
-#endif 
+#endif
 }
 
 int RdmaUnreliableProtocol::setMulticastReplicas(
@@ -109,7 +109,7 @@ int RdmaUnreliableProtocol::setMulticastReplicas(
 #else
     LOG(ERROR) << "not implemented";
     return -1;
-#endif 
+#endif
 }
 
 int RdmaUnreliableProtocol::doEventLoop(int64_t timeout) {

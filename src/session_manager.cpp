@@ -77,9 +77,7 @@ static inline std::string readString(int fd) {
     return str;
 }
 
-static inline bool isValidPort(int port) {
-    return port >= 0 && port <= 65535;
-}
+static inline bool isValidPort(int port) { return port >= 0 && port <= 65535; }
 
 static inline int parseHostPort(const std::string &address,
                                 std::string &hostname, uint16_t &port) {
@@ -175,7 +173,8 @@ static std::string getPeerName(int fd) {
         PLOG(ERROR) << "Failed to convert peer name to string";
         return "";
     }
-    return std::string(host_buf) + ":" + std::string(port_buf) + "/" + std::to_string(fd);
+    return std::string(host_buf) + ":" + std::string(port_buf) + "/" +
+           std::to_string(fd);
 }
 
 void SessionManager::listener() {
@@ -234,7 +233,7 @@ void SessionManager::listener() {
                     fd_list.erase(fd_list.begin() + i);
                     continue;
                 }
-                
+
                 auto peer_name = getPeerName(conn_fd);
                 if (peer_name.empty()) {
                     close(conn_fd);
@@ -285,8 +284,7 @@ int SessionManager::connect(const std::string &address,
 }
 
 bool SessionManager::isMulticastAddress(const std::string &address) {
-    if (address.find(":") != address.npos)
-        return false;
+    if (address.find(":") != address.npos) return false;
     std::istringstream iss(address);
     std::string token;
     std::vector<int> bytes;

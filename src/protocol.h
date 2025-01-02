@@ -4,8 +4,9 @@
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
-#include "rapid_transfer.h"
 #include <glog/logging.h>
+
+#include "rapid_transfer.h"
 
 namespace rapid {
 enum RequestType { SEND, RECEIVE };
@@ -31,8 +32,9 @@ struct Protocol {
         return -1;
     }
 
-    virtual int setMulticastReplicas(const std::string &multicast_addr,
-                                     const std::vector<std::string> &peer_name_list) {
+    virtual int setMulticastReplicas(
+        const std::string &multicast_addr,
+        const std::vector<std::string> &peer_name_list) {
         LOG(INFO) << "not implemented";
         return -1;
     }

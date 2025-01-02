@@ -97,8 +97,9 @@ int RdmaContext::construct(const std::string &device_name, uint8_t rdma_port,
 
     cq_list_.resize(num_cq_list);
     for (size_t i = 0; i < num_cq_list; ++i) {
-        cq_list_[i] = ibv_create_cq(context_, config_.max_cqe_count, this /* CQ context */,
-                                    compChannel(), compVector());
+        cq_list_[i] =
+            ibv_create_cq(context_, config_.max_cqe_count,
+                          this /* CQ context */, compChannel(), compVector());
         if (!cq_list_[i]) {
             PLOG(ERROR) << "RDMA context setup failed: completion queue";
             return -1;

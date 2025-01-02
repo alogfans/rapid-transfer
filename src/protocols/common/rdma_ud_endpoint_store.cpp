@@ -175,8 +175,7 @@ int RdmaUDEndPointStore::postSendRequest(
         wr.num_sge = actual_sge_count;
         wr.sg_list = &sge_list[i * kMaxSgeCount];
         wr.send_flags = IBV_SEND_SIGNALED;
-        if (actual_length < max_inline_bytes_)
-            wr.send_flags |= IBV_SEND_INLINE;
+        if (actual_length < max_inline_bytes_) wr.send_flags |= IBV_SEND_INLINE;
         wr.next = (i + 1 == wr_count) ? nullptr : &wr_list[i + 1];
         wr.wr.ud.ah = ah;
         wr.wr.ud.remote_qkey = 0;

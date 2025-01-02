@@ -124,7 +124,8 @@ int Controller::setupConnection(const std::string &peer_addr,
                                 const Attributes &peer) {
     auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_addr);
     if (!endpoint) return -1;
-    if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp") || !peer.count("ext_qp")) {
+    if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp") ||
+        !peer.count("ext_qp")) {
         LOG(ERROR) << "invalid peer attributes";
         return -1;
     }

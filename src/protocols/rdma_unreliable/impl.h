@@ -38,8 +38,9 @@ struct RdmaUnreliableProtocol : public Protocol {
 
     virtual int leaveMulticast(const std::string &multicast_addr);
 
-    virtual int setMulticastReplicas(const std::string &multicast_addr,
-                                     const std::vector<std::string> &peer_name_list);
+    virtual int setMulticastReplicas(
+        const std::string &multicast_addr,
+        const std::vector<std::string> &peer_name_list);
 
     virtual int prepareConnection(const std::string &peer_name,
                                   Attributes &local);
