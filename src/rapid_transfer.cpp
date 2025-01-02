@@ -16,9 +16,18 @@ std::shared_ptr<RapidTransfer> RapidTransfer::Create(
     engine->session_manager_ = new SessionManager();
     if (protocol == "rdma_reliable")
         engine->protocol_ = new RdmaReliableProtocol();
-    else if (protocol == "rdma_unreliable")
-        engine->protocol_ = new RdmaUnreliableProtocol();
-    else {
+    else if (protocol == "rdma_unreliable") {
+        size_t mtu_size = 4096;
+        size_t max_packets = 102400;
+        size_t queue_capacity = 4096;
+        if (getenv("RT_MTU_SIZE")) mtu_size = std::atoi(getenv("RT_MTU_SIZE"));
+        if (getenv("RT_MAX_PACKETS"))
+            max_packets = std::atoi(getenv("RT_MAX_PACKETS"));
+        if (getenv("RT_QUEUE_CAPACITY"))
+            queue_capacity = std::atoi(getenv("RT_QUEUE_CAPACITY"));
+        engine->protocol_ =
+            new RdmaUnreliableProtocol(mtu_size, max_packets, queue_capacity);
+    } else {
         LOG(ERROR) << "Unrecognized protocol";
         return nullptr;
     }

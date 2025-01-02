@@ -23,13 +23,14 @@
 #include "rapid_transfer.h"
 
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
-DEFINE_string(protocol, "rdma_reliable",
+DEFINE_string(protocol, "rdma_unreliable",
               "Transport protocol: rdma_reliable, rdma_unreliable");
 DEFINE_string(path, "", "Path of file to transfer");
-DEFINE_string(device, "mlx5_0", "RDMA device name to use");
+DEFINE_string(device, "ibp6s0", "RDMA device name to use");
 DEFINE_string(target, "optane21:12348",
-              "Target hostname (and port, if needed)");
+              "Target hostname with port, seperated using commas");
 DEFINE_string(listen, ":12348", "TCP listen address");
+DEFINE_uint32(num_recv_files, 1, "Number of receiving files");
 DEFINE_uint32(rdma_port, 1, "RDMA port");
 DEFINE_uint32(gid_index, 0, "GID Index");
 
@@ -100,14 +101,18 @@ int receiver() {
     auto engine = rapid::RapidTransfer::Create(
         FLAGS_protocol, FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
+    int ret = 0;
 
-    int ret = engine->joinMulticast(kMulticastAddress);
+#ifdef CONFIG_MCAST
+    ret = engine->joinMulticast(kMulticastAddress);
     if (ret) {
         LOG(ERROR) << "Failed to join multicast group";
         return -1;
     }
+#endif  // CONFIG_MCAST
 
-    const size_t dram_buffer_size = 1ull << 30;
+    const size_t dram_buffer_size = (1ull << 30) * FLAGS_num_recv_files;
+    std::atomic<int> start_recv_count(0);
     void *addr = allocateMemoryPool(dram_buffer_size, 0);
     if (!addr) {
         LOG(ERROR) << "Failed to allocate memory pool";
@@ -121,21 +126,69 @@ int receiver() {
         return -1;
     }
 
-    std::mutex mutex;
-    std::string peer_name;
+    auto cleanup = [&]() {
+        engine->shutdownListener();
+        engine->unregisterLocalMemory(addr);
+        freeMemoryPool(addr, dram_buffer_size);
+    };
 
-    TaskID task_id;
-    uint64_t length = UINT64_MAX, packet_length = 0;
-    auto on_new_connection = [&](const std::string &peer_name_, bool is_join) {
-        if (!is_join || !peer_name.empty()) {
-            LOG(INFO) << "The receiver can accept only one connection";
-            return;
+    auto wait_for_completion = [&](TaskID task_id) {
+        while (true) {
+            auto status = engine->getStatus(task_id, nullptr);
+            if (status == rapid::FAILED) {
+                LOG(ERROR) << "Failed to send data to remote";
+                return -1;
+            }
+
+            if (status == rapid::SUCCESS) return 0;
         }
-        LOG(INFO) << "Arriving connection: " << peer_name_;
-        mutex.lock();
-        peer_name = peer_name_;
-        task_id = engine->receive(peer_name, {{addr, sizeof(uint64_t)}});
-        mutex.unlock();
+    };
+
+    auto receiver = [&](const std::string source) -> int {
+        std::string path = "/tmp/received";
+        if (!FLAGS_path.empty()) path = FLAGS_path;
+
+        auto receiver_index = start_recv_count.fetch_add(1);
+        if (receiver_index) path += "." + std::to_string(receiver_index);
+
+        int fd = open(path.c_str(), O_RDWR | O_TRUNC | O_CREAT, 0644);
+        if (fd < 0) {
+            LOG(ERROR) << "Failed to open file " << FLAGS_path;
+            return -1;
+        }
+
+        const auto transferred_size = dram_buffer_size / FLAGS_num_recv_files;
+        auto start_addr = (char *)addr + transferred_size * receiver_index;
+
+        TaskID task_id =
+            engine->receive(source, {{start_addr, sizeof(uint64_t)}});
+        if (wait_for_completion(task_id)) {
+            return -1;
+        }
+
+        uint64_t file_size = *(uint64_t *)start_addr;
+        assert(file_size > 0 && file_size < (32ull << 30));
+        for (size_t offset = 0; offset < file_size;
+             offset += transferred_size) {
+            size_t chunk_size = std::min(transferred_size, file_size - offset);
+            task_id = engine->receive(source, {{start_addr, chunk_size}});
+            if (wait_for_completion(task_id)) {
+                return -1;
+            }
+            if ((ssize_t)chunk_size != writeFully(fd, start_addr, chunk_size)) {
+                return -1;
+            }
+        }
+
+        close(fd);
+        return 0;
+    };
+
+    std::vector<std::thread> receiver_list;
+    auto on_new_connection = [&](const std::string &peer_name, bool is_join) {
+        if (!is_join) return;
+        LOG(INFO) << "Arriving connection: " << peer_name;
+        receiver_list.emplace_back(std::bind(receiver, peer_name));
     };
 
     ret = engine->startListener(FLAGS_listen, on_new_connection);
@@ -145,60 +198,9 @@ int receiver() {
         freeMemoryPool(addr, dram_buffer_size);
         return -1;
     }
-
-    auto cleanup = [&]() {
-        engine->shutdownListener();
-        engine->unregisterLocalMemory(addr);
-        freeMemoryPool(addr, dram_buffer_size);
-    };
-
-    int fd = -1;
-    if (!FLAGS_path.empty()) {
-        fd = open(FLAGS_path.c_str(), O_RDWR | O_TRUNC | O_CREAT, 0644);
-        if (fd < 0) {
-            LOG(ERROR) << "Failed to open file " << FLAGS_path;
-            cleanup();
-            return -1;
-        }
-    }
-
-    while (true) {
-        mutex.lock();
-        if (peer_name.empty()) {
-            mutex.unlock();
-            continue;
-        }
-        mutex.unlock();
-        if (task_id < 0) {
-            LOG(INFO) << "Illegal task ID";
-            cleanup();
-            return -1;
-        }
-
-        auto status = engine->getStatus(task_id, nullptr);
-        if (status == SUCCESS) {
-            if (length == UINT64_MAX) {
-                length = *(uint64_t *)addr;
-                assert(length > 0 && length < (32ull << 30));
-            } else {
-                if ((ssize_t)packet_length !=
-                    writeFully(fd, addr, packet_length)) {
-                    cleanup();
-                    return -1;
-                }
-            }
-
-            packet_length = std::min(length, dram_buffer_size);
-            length -= packet_length;
-            engine->freeTask(task_id);
-            if (!packet_length) break;
-            task_id = engine->receive(peer_name, {{addr, packet_length}});
-        } else if (status == FAILED) {
-            cleanup();
-            return -1;
-        }
-    }
-
+    while (start_recv_count.load() < (int)FLAGS_num_recv_files)
+        std::this_thread::yield();
+    for (auto &receiver : receiver_list) receiver.join();
     cleanup();
     return 0;
 }
@@ -207,8 +209,10 @@ int sender() {
     auto engine = rapid::RapidTransfer::Create(
         FLAGS_protocol, FLAGS_device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
+    int ret;
 
-    int ret = engine->joinMulticast(kMulticastAddress);
+#ifdef CONFIG_MCAST
+    ret = engine->joinMulticast(kMulticastAddress);
     if (ret) {
         LOG(ERROR) << "Failed to join multicast group";
         return -1;
@@ -219,6 +223,7 @@ int sender() {
         LOG(ERROR) << "Failed to join multicast group";
         return -1;
     }
+#endif  // CONFIG_MCAST
 
     const size_t dram_buffer_size = 1ull << 30;
     void *addr = allocateMemoryPool(dram_buffer_size, 0);
@@ -267,7 +272,6 @@ int sender() {
             auto status = engine->getStatus(task_id, nullptr);
             if (status == rapid::FAILED) {
                 LOG(ERROR) << "Failed to send data to remote";
-                cleanup();
                 return -1;
             }
 
@@ -275,12 +279,25 @@ int sender() {
         }
     };
 
+    std::vector<std::string> target_list;
+    std::vector<TaskID> task_id_list;
+#ifdef CONFIG_MCAST
+    target_list.push_back(kMulticastAddress);
+#else
+    target_list = split(FLAGS_target, ',');
+#endif  // CONFIG_MCAST
+
     *(uint64_t *)addr = file_size;
-    TaskID task_id =
-        engine->send(kMulticastAddress, {{addr, sizeof(uint64_t)}});
-    if (wait_for_completion(task_id)) {
-        cleanup();
-        return -1;
+    for (auto target : target_list) {
+        TaskID task_id = engine->send(target, {{addr, sizeof(uint64_t)}});
+        task_id_list.push_back(task_id);
+    }
+
+    for (auto task_id : task_id_list) {
+        if (wait_for_completion(task_id)) {
+            cleanup();
+            return -1;
+        }
     }
 
     for (size_t offset = 0; offset < file_size; offset += dram_buffer_size) {
@@ -293,14 +310,18 @@ int sender() {
             }
         }
 
-        TaskID task_id = engine->send(kMulticastAddress, {{addr, chunk_size}});
-        if (wait_for_completion(task_id)) {
-            cleanup();
-            return -1;
+        task_id_list.clear();
+        for (auto target : target_list) {
+            TaskID task_id = engine->send(target, {{addr, chunk_size}});
+            task_id_list.push_back(task_id);
+        }
+        for (auto task_id : task_id_list) {
+            if (wait_for_completion(task_id)) {
+                cleanup();
+                return -1;
+            }
         }
     }
-
-    LOG(INFO) << "Sending completed";
     cleanup();
     return 0;
 }

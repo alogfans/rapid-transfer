@@ -12,8 +12,6 @@
 #include "protocol.h"
 #include "protocols/common/rdma_context.h"
 
-#define CONFIG_MCAST
-
 namespace rapid {
 struct RdmaUnreliableProtocol : public Protocol {
     const static size_t kDefaultMTUSize = 4096;

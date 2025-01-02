@@ -22,11 +22,10 @@
 #include "rapid_transfer.h"
 
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
-DEFINE_string(protocol, "rdma_reliable",
+DEFINE_string(protocol, "rdma_unreliable",
               "Transport protocol: rdma_reliable, rdma_unreliable");
-DEFINE_string(device, "mlx5_0", "RDMA device name to use");
-DEFINE_string(target_hostname, "optane21",
-              "Target hostname (and port, if needed)");
+DEFINE_string(device, "ibp6s0", "RDMA device name to use");
+DEFINE_string(target_hostname, "optane21", "Target hostname");
 DEFINE_uint32(first_port, 12345, "First TCP port for connecting");
 DEFINE_uint32(threads, 8, "Number of concurrent threads");
 DEFINE_uint32(block_size, 65536, "Access granularity");
