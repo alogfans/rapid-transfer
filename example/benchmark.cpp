@@ -4,6 +4,12 @@
 //
 // Copyright (C) 2024 Feng Ren
 
+// Test program
+// ./benchmark --role=receiver --protocol=rdma_unreliable --threads=16
+// --block_size=4096
+// ./benchmark --role=sender --target_hostname=vm-5-3-3 --threads=16
+// --protocol=rdma_unreliable --block_size=4096
+
 #include <fcntl.h>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
@@ -31,6 +37,7 @@ DEFINE_uint32(threads, 8, "Number of concurrent threads");
 DEFINE_uint32(block_size, 65536, "Access granularity");
 DEFINE_uint32(rdma_port, 1, "RDMA port");
 DEFINE_uint32(gid_index, 0, "GID Index");
+DEFINE_uint32(depth, 16, "Outstanding work requests per thread");
 
 using namespace rapid;
 
@@ -61,12 +68,15 @@ int receiveThread(int thread_id) {
     }
 
     std::mutex mutex;
-    std::unordered_map<std::string, TaskID> task_id_map;
+    std::unordered_multimap<std::string, TaskID> task_id_map;
     auto on_new_connection = [&](const std::string &peer_name, bool is_join) {
         LOG(INFO) << "Arriving connection: " << peer_name;
         mutex.lock();
-        task_id_map[peer_name] =
-            engine->receive(peer_name, {{addr, FLAGS_block_size}});
+        for (size_t depth = 0; depth < FLAGS_depth; ++depth) {
+            auto task_id =
+                engine->receive(peer_name, {{addr, FLAGS_block_size}});
+            task_id_map.emplace(std::make_pair(peer_name, task_id));
+        }
         mutex.unlock();
     };
 
@@ -128,27 +138,27 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
     while (g_running) {
         uint16_t port = FLAGS_first_port + lrand48() % FLAGS_threads;
         auto target = FLAGS_target_hostname + ":" + std::to_string(port);
-        // auto base = lrand48();
-        // for (uint64_t i = 0; i < chunk_size; ++i)
-        //     *((char *)addr + i) = (i + base) % 256;
-        TaskID task_id = engine->send(target, {{addr, chunk_size}});
-        if (task_id < 0) {
-            LOG(ERROR) << "Cannot post send request";
-            break;
-        }
-
-        while (true) {
-            auto status = engine->getStatus(task_id, nullptr);
-            if (status == rapid::FAILED) {
-                LOG(ERROR) << "Failed to send data to remote";
+        TaskID task_id_list[FLAGS_depth];
+        for (size_t depth = 0; depth < FLAGS_depth; depth++) {
+            task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
+            if (task_id_list[depth] < 0) {
+                LOG(ERROR) << "Cannot post send request";
                 break;
             }
-
-            if (status == rapid::SUCCESS) break;
         }
 
-        engine->freeTask(task_id);
-        transferred_bytes += chunk_size;
+        for (size_t depth = 0; depth < FLAGS_depth; depth++) {
+            while (true) {
+                auto status = engine->getStatus(task_id_list[depth], nullptr);
+                if (status == rapid::FAILED) {
+                    LOG(ERROR) << "Failed to send data to remote";
+                    break;
+                }
+                if (status == rapid::SUCCESS) break;
+            }
+            engine->freeTask(task_id_list[depth]);
+            transferred_bytes += chunk_size;
+        }
     }
     pthread_barrier_wait(barrier);
     g_transferred_bytes += transferred_bytes;

@@ -18,8 +18,8 @@ std::shared_ptr<RapidTransfer> RapidTransfer::Create(
         engine->protocol_ = new RdmaReliableProtocol();
     else if (protocol == "rdma_unreliable") {
         size_t mtu_size = 4096;
-        size_t max_packets = 102400;
-        size_t queue_capacity = 4096;
+        size_t max_packets = 25600;
+        size_t queue_capacity = 512;
         if (getenv("RT_MTU_SIZE")) mtu_size = std::atoi(getenv("RT_MTU_SIZE"));
         if (getenv("RT_MAX_PACKETS"))
             max_packets = std::atoi(getenv("RT_MAX_PACKETS"));
