@@ -69,7 +69,7 @@ int Context::runStep() {
     ret = pollCompletedPackets(SEND_CQ, current_ts);
     if (ret < 0) return ret;
 
-#ifdef DEBUG
+#ifndef DEBUG
     thread_local uint64_t last_ts = 0;
     if (current_ts - last_ts > 1000000) {
         thread_local uint64_t last_recv_packets = 0;
@@ -134,13 +134,21 @@ Status Context::getStatus(TaskID task_id, size_t *transferred_bytes) {
     auto &task = task_map_[task_id];
     if (task.is_send) {
         auto &queue = packet_manager_.getSendQueue(task.session);
-        if (queue.getAckSN() >= task.last_sn) {
-            return Status::SUCCESS;
+        auto ack_sn = queue.getAckSN();
+        auto next_sn = queue.getNextSN();
+        if (ack_sn <= next_sn) {
+            if (task.last_sn <= ack_sn) return Status::SUCCESS;
+        } else {
+            if (task.last_sn >= next_sn) return Status::SUCCESS;
         }
     } else {
         auto &queue = packet_manager_.getReceiveQueue(task.session);
-        if (queue.getAckSN() >= task.last_sn) {
-            return Status::SUCCESS;
+        auto ack_sn = queue.getAckSN();
+        auto next_sn = queue.getNextSN();
+        if (ack_sn <= next_sn) {
+            if (task.last_sn <= ack_sn) return Status::SUCCESS;
+        } else {
+            if (task.last_sn >= next_sn) return Status::SUCCESS;
         }
     }
     return Status::PENDING;

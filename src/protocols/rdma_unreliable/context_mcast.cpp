@@ -197,14 +197,22 @@ Status ContextMcast::getStatus(TaskID task_id, size_t *transferred_bytes) {
     if (!task_map_.count(task_id)) return Status::UNKNOWN;
     auto &task = task_map_[task_id];
     if (task.is_send) {
-        auto &queue = packet_manager_.getMcastSendQueue(task.session);
-        if (queue.getAckSN() >= task.last_sn) {
-            return Status::SUCCESS;
+        auto &queue = packet_manager_.getSendQueue(task.session);
+        auto ack_sn = queue.getAckSN();
+        auto next_sn = queue.getNextSN();
+        if (ack_sn <= next_sn) {
+            if (task.last_sn <= ack_sn) return Status::SUCCESS;
+        } else {
+            if (task.last_sn >= next_sn) return Status::SUCCESS;
         }
     } else {
         auto &queue = packet_manager_.getReceiveQueue(task.session);
-        if (queue.getAckSN() >= task.last_sn) {
-            return Status::SUCCESS;
+        auto ack_sn = queue.getAckSN();
+        auto next_sn = queue.getNextSN();
+        if (ack_sn <= next_sn) {
+            if (task.last_sn <= ack_sn) return Status::SUCCESS;
+        } else {
+            if (task.last_sn >= next_sn) return Status::SUCCESS;
         }
     }
     return Status::PENDING;

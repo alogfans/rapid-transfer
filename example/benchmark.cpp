@@ -186,7 +186,7 @@ int sender() {
     pthread_barrier_wait(&barrier);
     gettimeofday(&tv_begin, nullptr);
 
-    sleep(20);
+    sleep(30);
     g_running = false;
 
     pthread_barrier_wait(&barrier);
