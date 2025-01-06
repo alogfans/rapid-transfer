@@ -217,51 +217,53 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
 
 int Context::sendDataPackets(uint64_t current_ts) {
     auto &context = controller_.context();
+    std::vector<Request *> request_list;
     for (auto session : active_session_map_) {
         auto endpoint = controller_.getOrCreateEndpoint(session.first);
         if (!endpoint) return -1;
-        std::vector<Request *> request_list;
-        packet_manager_.getSendQueue(session.first)
-            .forEach([&](PacketHandle &handle) -> int {
-                if (current_ts - handle.ts < recv_rto_) return 0;
-                if (handle.ts) {
-                    session.second.ssthresh =
-                        std::max(kMinSSThreshValue, session.second.cwnd / 2);
-                    session.second.cwnd = 1;
-                    session.second.incr = mtu_size_;
-                    packet_manager_.getSendQueue(session.first)
-                        .setWndSize(session.second.cwnd);
-                }
-                handle.ts = current_ts;
-                std::vector<Buffer> slices;
-                uint32_t imm_data;
-                if (handle.serialize(slices, imm_data)) return -1;
-                Request *request = nullptr;
-                if (slices.size() == 1)
-                    request = new Request{.addr = {slices[0].addr},
-                                          .length = {slices[0].length},
-                                          .lkey = {local_arena_lkey_},
-                                          .imm_data = imm_data};
-                else if (slices.size() == 2)
-                    request = new Request{
-                        .addr = {slices[0].addr, slices[1].addr},
-                        .length = {slices[0].length, slices[1].length},
-                        .lkey = {local_arena_lkey_,
-                                 context.key(slices[1].addr).first},
-                        .imm_data = imm_data};
-                else
-                    return -1;
-                request_list.push_back(request);
-                if (request_list.size() == 4) {
-                    auto request_list_len = request_list.size();
-                    endpoint->postSendRequest(request_list);
-                    session.second.send_packets += request_list_len;
-                    stats_.send_packets.fetch_add(request_list_len,
-                                                  std::memory_order_relaxed);
-                    request_list.clear();
-                }
-                return 0;
-            });
+        request_list.clear();
+        auto &send_queue = packet_manager_.getSendQueue(session.first);
+        uint64_t head, tail;
+        send_queue.getIndexRange(head, tail);
+        for (auto curr = tail; curr < head; curr++) {
+            auto &handle = send_queue.getMutableEntry(curr);
+            if (current_ts - handle.ts < recv_rto_) continue;
+            if (handle.ts) {
+                session.second.ssthresh =
+                    std::max(kMinSSThreshValue, session.second.cwnd / 2);
+                session.second.cwnd = 1;
+                session.second.incr = mtu_size_;
+                send_queue.setWndSize(session.second.cwnd);
+            }
+            handle.ts = current_ts;
+            std::vector<Buffer> slices;
+            uint32_t imm_data;
+            if (handle.serialize(slices, imm_data)) return -1;
+            Request *request = nullptr;
+            if (slices.size() == 1)
+                request = new Request{.addr = {slices[0].addr},
+                                        .length = {slices[0].length},
+                                        .lkey = {local_arena_lkey_},
+                                        .imm_data = imm_data};
+            else if (slices.size() == 2)
+                request = new Request{
+                    .addr = {slices[0].addr, slices[1].addr},
+                    .length = {slices[0].length, slices[1].length},
+                    .lkey = {local_arena_lkey_,
+                                context.key(slices[1].addr).first},
+                    .imm_data = imm_data};
+            else
+                continue;
+            request_list.push_back(request);
+            if (request_list.size() == 4) {
+                auto request_list_len = request_list.size();
+                endpoint->postSendRequest(request_list);
+                session.second.send_packets += request_list_len;
+                stats_.send_packets.fetch_add(request_list_len,
+                                                std::memory_order_relaxed);
+                request_list.clear();
+            }
+        }
         auto request_list_len = request_list.size();
         if (request_list_len) {
             endpoint->postSendRequest(request_list);
@@ -336,11 +338,11 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
                         active_session_map_[session].recv_packets++;
                     break;
                 case PKT_CMD_ACK: {
-                    packet_manager_.getSendQueue(session).markCompleted(
-                        handle.sn);
+                    auto &send_queue = packet_manager_.getSendQueue(session);
+                    send_queue.markCompleted(handle.sn);
                     auto rtt = (current_ts - handle.ts) & ((1ull << 48) - 1);
                     updateRTO(rtt);
-                    updateWndOnSuccess(session, handle.wnd);
+                    updateWndOnSuccess(session, handle.wnd, send_queue);
                     break;
                 }
                 default:
@@ -368,7 +370,7 @@ void Context::updateRTO(uint64_t rtt) {
     recv_rto_ = std::min(std::max(kMinRTO, rto), kMaxRTO);
 }
 
-void Context::updateWndOnSuccess(int session, uint32_t rwnd) {
+void Context::updateWndOnSuccess(int session, uint32_t rwnd, SendQueue &send_queue) {
     auto &entry = active_session_map_[session];
     if (entry.cwnd < entry.ssthresh) {
         entry.cwnd++;
@@ -380,11 +382,10 @@ void Context::updateWndOnSuccess(int session, uint32_t rwnd) {
             entry.cwnd = (entry.incr + mtu_size_ - 1) / mtu_size_;
         }
     }
-    auto &queue = packet_manager_.getSendQueue(session);
     entry.rwnd = rwnd;
     entry.cwnd = std::min(entry.rwnd, entry.cwnd);
-    if (queue.getWndSize() != entry.cwnd) {
-        queue.setWndSize(entry.cwnd);
+    if (send_queue.getWndSize() != entry.cwnd) {
+        send_queue.setWndSize(entry.cwnd);
     }
 }
 

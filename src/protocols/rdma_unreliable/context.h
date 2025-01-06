@@ -51,7 +51,7 @@ class Context {
 
     void updateRTO(uint64_t rtt);
 
-    void updateWndOnSuccess(int session, uint32_t rwnd);
+    void updateWndOnSuccess(int session, uint32_t rwnd, SendQueue &send_queue);
 
     int processReceivedPacket(uint64_t current_ts, ibv_wc &wc);
 

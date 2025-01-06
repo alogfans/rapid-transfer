@@ -113,7 +113,8 @@ int RdmaUnreliableProtocol::setMulticastReplicas(
 }
 
 int RdmaUnreliableProtocol::doEventLoop(int64_t timeout) {
-    if (lrand48() % 8) return 0;  // drop requests
+    thread_local uint64_t step_count = 0;
+    if ((++step_count) % 8) return 0;  // drop requests
     do {
         int rc = context_.runStep();
         if (rc) {

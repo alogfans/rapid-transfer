@@ -16,8 +16,6 @@
 #include <vector>
 
 namespace rapid {
-using Attributes = std::unordered_map<std::string, std::string>;
-
 struct Buffer {
     void *addr;
     size_t length;
@@ -53,10 +51,13 @@ class RapidTransfer {
 
     virtual ~RapidTransfer();
 
+    // Join current instance to the multicast group
     int joinMulticast(const std::string &multicast_addr);
 
+    // Leave current instance from the multicast group
     int leaveMulticast(const std::string &multicast_addr);
 
+    // Set peer nodes for multicast transfer. Required for multicast sender size
     int setMulticastReplicas(const std::string &multicast_addr,
                              const std::vector<std::string> &peer_name_list);
 

@@ -7,6 +7,7 @@
 #include <glog/logging.h>
 
 #include "rapid_transfer.h"
+#include "session_manager.h"
 
 namespace rapid {
 enum RequestType { SEND, RECEIVE };

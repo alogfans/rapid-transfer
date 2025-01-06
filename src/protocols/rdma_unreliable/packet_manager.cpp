@@ -230,14 +230,14 @@ SendQueue::~SendQueue() {
 }
 
 int SendQueue::push(const std::vector<Buffer> &slice_list, uint32_t &last_sn) {
-    RWSpinlock::WriteGuard guard(queue_lock_);
+    // RWSpinlock::WriteGuard guard(queue_lock_);
     auto fragment_id = secondary_queue_.push(slice_list);
     last_sn = SHORT_SN(fragment_id.second);
     return fillPrimaryQueue();
 }
 
 int SendQueue::markCompleted(uint32_t ack_sn) {
-    RWSpinlock::WriteGuard guard(queue_lock_);
+    // RWSpinlock::WriteGuard guard(queue_lock_);
     // case 1: XXX tail_ ... ack_sn ... head_ XXX
     // case 2: ... ack_sn ... head  XXX tail ...
     auto tail = SHORT_SN(tail_), head = SHORT_SN(head_);
@@ -270,14 +270,14 @@ int SendQueue::fillPrimaryQueue() {
 }
 
 int SendQueue::getIndexRange(uint64_t &head, uint64_t &tail) {
-    RWSpinlock::ReadGuard guard(queue_lock_);
+    // RWSpinlock::ReadGuard guard(queue_lock_);
     head = head_;
     tail = tail_;
     return 0;
 }
 
 int SendQueue::forEach(std::function<int(PacketHandle &)> func) {
-    RWSpinlock::ReadGuard guard(queue_lock_);
+    // RWSpinlock::ReadGuard guard(queue_lock_);
     for (auto curr = tail_.load(); curr != head_.load(); curr++) {
         auto &handle = handle_[curr % queue_capacity_];
         func(handle);
@@ -451,7 +451,7 @@ int ReceiveQueue::fillPrimaryQueue() {
 }
 
 int ReceiveQueue::getIndexRange(uint64_t &head, uint64_t &tail) {
-    RWSpinlock::ReadGuard guard(queue_lock_);
+    // RWSpinlock::ReadGuard guard(queue_lock_);
     head = head_;
     tail = tail_;
     return 0;

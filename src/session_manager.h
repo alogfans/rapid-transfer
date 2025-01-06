@@ -13,6 +13,8 @@
 #include "rapid_transfer.h"
 
 namespace rapid {
+using Attributes = std::unordered_map<std::string, std::string>;
+
 class SessionManager {
    public:
     using OnAcceptCallback = std::function<int(

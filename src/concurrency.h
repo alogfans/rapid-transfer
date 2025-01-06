@@ -146,6 +146,41 @@ class TicketLock {
     std::atomic<int> now_serving_;
     uint64_t padding_[14];
 };
+
+static inline int64_t getCurrentTimeInNano() {
+    const int64_t kNanosPerSecond = 1000 * 1000 * 1000;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts)) {
+        return -1;
+    }
+    return (int64_t{ts.tv_sec} * kNanosPerSecond + int64_t{ts.tv_nsec});
+}
+
+class SimpleRandom {
+   public:
+    SimpleRandom(uint32_t seed) : current(seed) {}
+
+    static SimpleRandom &Get() {
+        static std::atomic<uint64_t> g_incr_val(0);
+        thread_local SimpleRandom g_random(getCurrentTimeInNano() +
+                                           g_incr_val.fetch_add(1));
+        return g_random;
+    }
+
+    // 生成下一个伪随机数
+    uint32_t next() {
+        current = (a * current + c) % m;
+        return current;
+    }
+
+    uint32_t next(uint32_t max) { return next() % max; }
+
+   private:
+    uint32_t current;
+    static const uint32_t a = 1664525;
+    static const uint32_t c = 1013904223;
+    static const uint32_t m = 0xFFFFFFFF;
+};
 }  // namespace rapid
 
 #endif  // CONCURRENCY_H

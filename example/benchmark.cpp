@@ -148,7 +148,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
         }
 
         for (size_t depth = 0; depth < FLAGS_depth; depth++) {
-            while (true) {
+            while (g_running) {
                 auto status = engine->getStatus(task_id_list[depth], nullptr);
                 if (status == rapid::FAILED) {
                     LOG(ERROR) << "Failed to send data to remote";
