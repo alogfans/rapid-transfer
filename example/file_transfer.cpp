@@ -24,17 +24,17 @@
 
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
 DEFINE_string(protocol, "rdma_unreliable",
-              "Transport protocol: rdma_reliable, rdma_unreliable");
+              "Transport protocol: rdma_reliable, rdma_unreliable, "
+              "rdma_unreliable_mcast");
 DEFINE_string(path, "", "Path of file to transfer");
 DEFINE_string(device, "ibp6s0", "RDMA device name to use");
 DEFINE_string(target, "optane21:12348",
               "Target hostname with port, seperated using commas");
+DEFINE_string(multicast_addr, "239.0.0.1", "Multicast address");
 DEFINE_string(listen, ":12348", "TCP listen address");
 DEFINE_uint32(num_recv_files, 1, "Number of receiving files");
 DEFINE_uint32(rdma_port, 1, "RDMA port");
 DEFINE_uint32(gid_index, 0, "GID Index");
-
-const static std::string kMulticastAddress = "239.0.0.1";
 
 using namespace rapid;
 
@@ -104,7 +104,7 @@ int receiver() {
     int ret = 0;
 
     if (FLAGS_protocol == "rdma_unreliable_mcast") {
-        ret = engine->joinMulticast(kMulticastAddress);
+        ret = engine->joinMulticast(FLAGS_multicast_addr);
         if (ret) {
             LOG(ERROR) << "Failed to join multicast group";
             return -1;
@@ -212,12 +212,12 @@ int sender() {
     int ret;
 
     if (FLAGS_protocol == "rdma_unreliable_mcast") {
-        ret = engine->joinMulticast(kMulticastAddress);
+        ret = engine->joinMulticast(FLAGS_multicast_addr);
         if (ret) {
             LOG(ERROR) << "Failed to join multicast group";
             return -1;
         }
-        ret = engine->setMulticastReplicas(kMulticastAddress,
+        ret = engine->setMulticastReplicas(FLAGS_multicast_addr,
                                            split(FLAGS_target, ','));
         if (ret) {
             LOG(ERROR) << "Failed to join multicast group";
@@ -282,7 +282,7 @@ int sender() {
     std::vector<std::string> target_list;
     std::vector<TaskID> task_id_list;
     if (FLAGS_protocol == "rdma_unreliable_mcast") {
-        target_list.push_back(kMulticastAddress);
+        target_list.push_back(FLAGS_multicast_addr);
     } else {
         target_list = split(FLAGS_target, ',');
     }

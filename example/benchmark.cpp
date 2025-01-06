@@ -29,7 +29,8 @@
 
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
 DEFINE_string(protocol, "rdma_unreliable",
-              "Transport protocol: rdma_reliable, rdma_unreliable");
+              "Transport protocol: rdma_reliable, rdma_unreliable, "
+              "rdma_unreliable_mcast");
 DEFINE_string(device, "ibp6s0", "RDMA device name to use");
 DEFINE_string(target_hostname, "optane21", "Target hostname");
 DEFINE_uint32(first_port, 12345, "First TCP port for connecting");
