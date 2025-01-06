@@ -84,32 +84,20 @@ int RdmaUnreliableProtocol::unregisterLocalMemory(void *addr) {
 }
 
 int RdmaUnreliableProtocol::joinMulticast(const std::string &multicast_addr) {
-#ifdef CONFIG_MCAST
-    return context_.joinMulticast(multicast_addr);
-#else
     LOG(ERROR) << "not implemented";
     return -1;
-#endif
 }
 
 int RdmaUnreliableProtocol::leaveMulticast(const std::string &multicast_addr) {
-#ifdef CONFIG_MCAST
-    return context_.leaveMulticast(multicast_addr);
-#else
     LOG(ERROR) << "not implemented";
     return -1;
-#endif
 }
 
 int RdmaUnreliableProtocol::setMulticastReplicas(
     const std::string &multicast_addr,
     const std::vector<std::string> &peer_name_list) {
-#ifdef CONFIG_MCAST
-    return context_.setMulticastReplicas(multicast_addr, peer_name_list);
-#else
     LOG(ERROR) << "not implemented";
     return -1;
-#endif
 }
 
 int RdmaUnreliableProtocol::doEventLoop(int64_t timeout) {

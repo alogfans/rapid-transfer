@@ -525,7 +525,6 @@ McastSendQueue &PacketManager::getMcastSendQueue(int sid) {
     queue_lock_.unlockShared();
     queue_lock_.lock();
     if (!mcast_send_queue_.count(sid)) {
-        LOG(INFO) << sid / 256 << " " << mcast_replica_num_[sid / 256];
         auto entry =
             new McastSendQueue(mtu_size_, queue_capacity_, wnd_size_, pool_,
                                sid % 256, mcast_replica_num_[sid / 256]);

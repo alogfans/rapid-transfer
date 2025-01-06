@@ -6,27 +6,35 @@
 #include "protocol.h"
 #include "protocols/rdma_reliable/impl.h"
 #include "protocols/rdma_unreliable/impl.h"
+#include "protocols/rdma_unreliable/impl_mcast.h"
 #include "session_manager.h"
 
 namespace rapid {
 std::shared_ptr<RapidTransfer> RapidTransfer::Create(
     const std::string &protocol, const std::string &device_name,
     uint8_t rdma_port, int gid_index) {
+    size_t mtu_size = 4096;
+    size_t max_packets = 25600;
+    size_t queue_capacity = 512;
+    if (getenv("RT_MTU_SIZE")) {
+        mtu_size = std::atoi(getenv("RT_MTU_SIZE"));
+    }
+    if (getenv("RT_MAX_PACKETS")) {
+        max_packets = std::atoi(getenv("RT_MAX_PACKETS"));
+    }
+    if (getenv("RT_QUEUE_CAPACITY")) {
+        queue_capacity = std::atoi(getenv("RT_QUEUE_CAPACITY"));
+    }
     auto engine = std::make_shared<RapidTransfer>(device_name);
     engine->session_manager_ = new SessionManager();
-    if (protocol == "rdma_reliable")
+    if (protocol == "rdma_reliable") {
         engine->protocol_ = new RdmaReliableProtocol();
-    else if (protocol == "rdma_unreliable") {
-        size_t mtu_size = 4096;
-        size_t max_packets = 25600;
-        size_t queue_capacity = 512;
-        if (getenv("RT_MTU_SIZE")) mtu_size = std::atoi(getenv("RT_MTU_SIZE"));
-        if (getenv("RT_MAX_PACKETS"))
-            max_packets = std::atoi(getenv("RT_MAX_PACKETS"));
-        if (getenv("RT_QUEUE_CAPACITY"))
-            queue_capacity = std::atoi(getenv("RT_QUEUE_CAPACITY"));
+    } else if (protocol == "rdma_unreliable") {
         engine->protocol_ =
             new RdmaUnreliableProtocol(mtu_size, max_packets, queue_capacity);
+    } else if (protocol == "rdma_unreliable_mcast") {
+        engine->protocol_ =
+            new RdmaUnreliableMcastProtocol(mtu_size, max_packets, queue_capacity);
     } else {
         LOG(ERROR) << "Unrecognized protocol";
         return nullptr;

@@ -1,7 +1,7 @@
 // Copyright 2024 Feng Ren
 
-#ifndef RDMA_UNRELIABLE_PROTOCOL_H
-#define RDMA_UNRELIABLE_PROTOCOL_H
+#ifndef RDMA_UNRELIABLE_MCAST_PROTOCOL_H
+#define RDMA_UNRELIABLE_MCAST_PROTOCOL_H
 
 #include <atomic>
 #include <map>
@@ -13,19 +13,20 @@
 #include "protocols/common/rdma_context.h"
 
 namespace rapid {
-struct RdmaUnreliableProtocol : public Protocol {
+struct RdmaUnreliableMcastProtocol : public Protocol {
     const static size_t kDefaultMTUSize = 4096;
     const static size_t kMaxPackets = 102400;
     const static size_t kQueueCapacity = 4096;
 
-    RdmaUnreliableProtocol(size_t mtu_size = kDefaultMTUSize,
-                           size_t max_packets = kMaxPackets,
-                           size_t queue_capacity = kQueueCapacity,
-                           bool spawn_worker = false);
+    RdmaUnreliableMcastProtocol(size_t mtu_size = kDefaultMTUSize,
+                                size_t max_packets = kMaxPackets,
+                                size_t queue_capacity = kQueueCapacity,
+                                bool spawn_worker = false);
 
-    virtual ~RdmaUnreliableProtocol();
-    RdmaUnreliableProtocol(const RdmaUnreliableProtocol &) = delete;
-    RdmaUnreliableProtocol &operator=(const RdmaUnreliableProtocol &) = delete;
+    virtual ~RdmaUnreliableMcastProtocol();
+    RdmaUnreliableMcastProtocol(const RdmaUnreliableMcastProtocol &) = delete;
+    RdmaUnreliableMcastProtocol &operator=(
+        const RdmaUnreliableMcastProtocol &) = delete;
 
     virtual int construct(const std::string &device_name, uint8_t rdma_port,
                           int gid_index);
@@ -63,11 +64,11 @@ struct RdmaUnreliableProtocol : public Protocol {
     int doEventLoop(int64_t timeout = -1);
 
    private:
-    Context context_;
+    ContextMcast context_;
     const bool spawn_worker_;
     std::atomic<bool> worker_running_;
     std::thread worker_;
 };
 }  // namespace rapid
 
-#endif  // RDMA_UNRELIABLE_PROTOCOL_H
+#endif  // RDMA_UNRELIABLE_MCAST_PROTOCOL_H

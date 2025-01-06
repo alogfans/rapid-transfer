@@ -367,7 +367,7 @@ int ContextMcast::sendDataPackets(uint64_t current_ts) {
                 uint32_t imm_data;
                 if (handle.serialize(slices, imm_data)) return -1;
                 Request *request = nullptr;
-                LOG(INFO) << "send data ... sn = " << handle.sn;
+                // LOG(INFO) << "send data ... sn = " << handle.sn;
                 if (slices.size() == 1)
                     request = new Request{
                         .addr = {slices[0].addr},
@@ -433,7 +433,7 @@ int ContextMcast::sendAckPackets(uint64_t current_ts) {
         auto endpoint = controller_.getOrCreateEndpoint(session.first);
         if (!endpoint) return -1;
         int ret = endpoint->postSendRequest({request});
-        LOG(INFO) << "send ack ... " << handle.sn;
+        // LOG(INFO) << "send ack ... " << handle.sn;
         if (ret != 1) return -1;
         session.second.ack_packets = session.second.recv_packets;
         stats_.ack_packets.fetch_add(1, std::memory_order_relaxed);
@@ -470,7 +470,7 @@ int ContextMcast::processReceivedPacket(uint64_t current_ts, ibv_wc &wc,
                     packet_manager_.getReceiveQueue(session).getIndexRange(
                         head, tail);
                     if (head == tail) break;
-                    LOG(INFO) << "recv data ... " << handle.sn;
+                    // LOG(INFO) << "recv data ... " << handle.sn;
                     packet_manager_.getReceiveQueue(session).markCompleted(
                         handle);
                     stats_.recv_packets.fetch_add(1, std::memory_order_relaxed);
@@ -481,7 +481,7 @@ int ContextMcast::processReceivedPacket(uint64_t current_ts, ibv_wc &wc,
                 case PKT_CMD_ACK: {
                     int index = 0;
                     session = controller_.redirectMulticast(session, index);
-                    LOG(INFO) << "recv ack ... " << session;
+                    // LOG(INFO) << "recv ack ... " << session;
                     packet_manager_.getMcastSendQueue(session).markCompleted(
                         index, handle.sn);
                     auto rtt = (current_ts - handle.ts) & ((1ull << 48) - 1);

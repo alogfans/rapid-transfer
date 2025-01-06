@@ -103,13 +103,13 @@ int receiver() {
     assert(engine);
     int ret = 0;
 
-#ifdef CONFIG_MCAST
-    ret = engine->joinMulticast(kMulticastAddress);
-    if (ret) {
-        LOG(ERROR) << "Failed to join multicast group";
-        return -1;
+    if (FLAGS_protocol == "rdma_unreliable_mcast") {
+        ret = engine->joinMulticast(kMulticastAddress);
+        if (ret) {
+            LOG(ERROR) << "Failed to join multicast group";
+            return -1;
+        }
     }
-#endif  // CONFIG_MCAST
 
     const size_t dram_buffer_size = (1ull << 30) * FLAGS_num_recv_files;
     std::atomic<int> start_recv_count(0);
@@ -211,19 +211,19 @@ int sender() {
     assert(engine);
     int ret;
 
-#ifdef CONFIG_MCAST
-    ret = engine->joinMulticast(kMulticastAddress);
-    if (ret) {
-        LOG(ERROR) << "Failed to join multicast group";
-        return -1;
+    if (FLAGS_protocol == "rdma_unreliable_mcast") {
+        ret = engine->joinMulticast(kMulticastAddress);
+        if (ret) {
+            LOG(ERROR) << "Failed to join multicast group";
+            return -1;
+        }
+        ret = engine->setMulticastReplicas(kMulticastAddress,
+                                           split(FLAGS_target, ','));
+        if (ret) {
+            LOG(ERROR) << "Failed to join multicast group";
+            return -1;
+        }
     }
-    ret = engine->setMulticastReplicas(kMulticastAddress,
-                                       split(FLAGS_target, ','));
-    if (ret) {
-        LOG(ERROR) << "Failed to join multicast group";
-        return -1;
-    }
-#endif  // CONFIG_MCAST
 
     const size_t dram_buffer_size = 1ull << 30;
     void *addr = allocateMemoryPool(dram_buffer_size, 0);
@@ -281,11 +281,11 @@ int sender() {
 
     std::vector<std::string> target_list;
     std::vector<TaskID> task_id_list;
-#ifdef CONFIG_MCAST
-    target_list.push_back(kMulticastAddress);
-#else
-    target_list = split(FLAGS_target, ',');
-#endif  // CONFIG_MCAST
+    if (FLAGS_protocol == "rdma_unreliable_mcast") {
+        target_list.push_back(kMulticastAddress);
+    } else {
+        target_list = split(FLAGS_target, ',');
+    }
 
     *(uint64_t *)addr = file_size;
     for (auto target : target_list) {
