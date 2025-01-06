@@ -312,14 +312,14 @@ McastSendQueue::~McastSendQueue() {
 
 int McastSendQueue::push(const std::vector<Buffer> &slice_list,
                          uint32_t &last_sn) {
-    RWSpinlock::WriteGuard guard(queue_lock_);
+    // RWSpinlock::WriteGuard guard(queue_lock_);
     auto fragment_id = secondary_queue_.push(slice_list);
     last_sn = SHORT_SN(fragment_id.second);
     return fillPrimaryQueue();
 }
 
 int McastSendQueue::markCompleted(int index, uint32_t ack_sn) {
-    RWSpinlock::WriteGuard guard(queue_lock_);
+    // RWSpinlock::WriteGuard guard(queue_lock_);
     // case 1: XXX tail_ ... ack_sn ... head_ XXX
     // case 2: ... ack_sn ... head  XXX tail ...
     if (index < 0 || index >= (int)tail_list_.size()) {
@@ -363,14 +363,14 @@ int McastSendQueue::fillPrimaryQueue() {
 }
 
 int McastSendQueue::getIndexRange(uint64_t &head, uint64_t &tail) {
-    RWSpinlock::ReadGuard guard(queue_lock_);
+    // RWSpinlock::ReadGuard guard(queue_lock_);
     head = head_;
     tail = getMinTailIndex();
     return 0;
 }
 
 int McastSendQueue::forEach(std::function<int(PacketHandle &)> func) {
-    RWSpinlock::ReadGuard guard(queue_lock_);
+    // RWSpinlock::ReadGuard guard(queue_lock_);
     for (auto curr = getMinTailIndex(); curr != head_; curr++) {
         auto &handle = handle_[curr % queue_capacity_];
         func(handle);
@@ -402,14 +402,14 @@ ReceiveQueue::ReceiveQueue(size_t mtu_size, size_t queue_capacity,
 
 int ReceiveQueue::push(const std::vector<Buffer> &slice_list,
                        uint32_t &last_sn) {
-    RWSpinlock::WriteGuard guard(queue_lock_);
+    // RWSpinlock::WriteGuard guard(queue_lock_);
     auto fragment_id = secondary_queue_.push(slice_list);
     last_sn = SHORT_SN(fragment_id.second);
     return fillPrimaryQueue();
 }
 
 int ReceiveQueue::markCompleted(PacketHandle &handle) {
-    RWSpinlock::WriteGuard guard(queue_lock_);
+    // RWSpinlock::WriteGuard guard(queue_lock_);
     auto wnd_start = SHORT_SN(tail_);
     auto wnd_end = SHORT_SN(tail_ + wnd_size_);
     if (wnd_start <= wnd_end) {

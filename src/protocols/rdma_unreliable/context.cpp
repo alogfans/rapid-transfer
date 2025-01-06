@@ -103,7 +103,7 @@ TaskID Context::send(const std::string &peer_name,
     uint32_t last_sn;
     int ret = packet_manager_.getSendQueue(session).push(buffer_list, last_sn);
     if (ret) return ret;
-    int task_id = next_task_id_.fetch_add(1);
+    int task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
     task_map_[task_id] = Task{session, last_sn, true};
     return task_id;
 }
@@ -216,14 +216,13 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
 }
 
 int Context::sendDataPackets(uint64_t current_ts) {
+    const static size_t kRequestBatchSize = 4;
     auto &context = controller_.context();
-    std::vector<Request *> request_list;
     for (auto session : active_session_map_) {
-        auto endpoint = controller_.getOrCreateEndpoint(session.first);
-        if (!endpoint) return -1;
-        request_list.clear();
-        auto &send_queue = packet_manager_.getSendQueue(session.first);
+        std::vector<Request *> request_list;
+        std::shared_ptr<RdmaUDEndPoint> endpoint;
         uint64_t head, tail;
+        auto &send_queue = packet_manager_.getSendQueue(session.first);
         send_queue.getIndexRange(head, tail);
         for (auto curr = tail; curr < head; curr++) {
             auto &handle = send_queue.getMutableEntry(curr);
@@ -242,25 +241,30 @@ int Context::sendDataPackets(uint64_t current_ts) {
             Request *request = nullptr;
             if (slices.size() == 1)
                 request = new Request{.addr = {slices[0].addr},
-                                        .length = {slices[0].length},
-                                        .lkey = {local_arena_lkey_},
-                                        .imm_data = imm_data};
+                                      .length = {slices[0].length},
+                                      .lkey = {local_arena_lkey_},
+                                      .imm_data = imm_data};
             else if (slices.size() == 2)
-                request = new Request{
-                    .addr = {slices[0].addr, slices[1].addr},
-                    .length = {slices[0].length, slices[1].length},
-                    .lkey = {local_arena_lkey_,
-                                context.key(slices[1].addr).first},
-                    .imm_data = imm_data};
+                request =
+                    new Request{.addr = {slices[0].addr, slices[1].addr},
+                                .length = {slices[0].length, slices[1].length},
+                                .lkey = {local_arena_lkey_,
+                                         context.key(slices[1].addr).first},
+                                .imm_data = imm_data};
             else
                 continue;
+
+            if (!endpoint) {
+                endpoint = controller_.getOrCreateEndpoint(session.first);
+                if (!endpoint) return -1;
+            }
             request_list.push_back(request);
-            if (request_list.size() == 4) {
+            if (request_list.size() == kRequestBatchSize) {
                 auto request_list_len = request_list.size();
                 endpoint->postSendRequest(request_list);
                 session.second.send_packets += request_list_len;
                 stats_.send_packets.fetch_add(request_list_len,
-                                                std::memory_order_relaxed);
+                                              std::memory_order_relaxed);
                 request_list.clear();
             }
         }
@@ -370,7 +374,8 @@ void Context::updateRTO(uint64_t rtt) {
     recv_rto_ = std::min(std::max(kMinRTO, rto), kMaxRTO);
 }
 
-void Context::updateWndOnSuccess(int session, uint32_t rwnd, SendQueue &send_queue) {
+void Context::updateWndOnSuccess(int session, uint32_t rwnd,
+                                 SendQueue &send_queue) {
     auto &entry = active_session_map_[session];
     if (entry.cwnd < entry.ssthresh) {
         entry.cwnd++;

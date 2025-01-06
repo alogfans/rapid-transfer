@@ -209,6 +209,10 @@ class McastSendQueue {
 
     int forEach(std::function<int(PacketHandle &)> func);
 
+    PacketHandle &getMutableEntry(uint64_t index) {
+        return handle_[index % queue_capacity_];
+    }
+
     void setWndSize(uint16_t wnd_size) {
         wnd_size_ = std::min(wnd_size, (uint16_t)queue_capacity_);
     }
