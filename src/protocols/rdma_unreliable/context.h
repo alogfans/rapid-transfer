@@ -73,6 +73,7 @@ class Context {
     std::atomic<TaskID> next_task_id_;
 
     const static uint32_t kMinSSThreshValue = 2;
+    const static uint32_t kResendValue = 2;
 
     struct SessionInfo {
         SessionInfo()

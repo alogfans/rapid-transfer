@@ -69,7 +69,7 @@ int Context::runStep() {
     ret = pollCompletedPackets(SEND_CQ, current_ts);
     if (ret < 0) return ret;
 
-#ifndef DEBUG
+#ifdef DEBUG
     thread_local uint64_t last_ts = 0;
     if (current_ts - last_ts > 1000000) {
         thread_local uint64_t last_recv_packets = 0;
@@ -238,7 +238,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
             if (handle.ts) {
                 session.second.ssthresh =
                     std::max(kMinSSThreshValue, session.second.cwnd / 2);
-                session.second.cwnd = 1;
+                session.second.cwnd = session.second.ssthresh + kResendValue;
                 session.second.incr = mtu_size_;
                 send_queue.setWndSize(session.second.cwnd);
             }
@@ -296,7 +296,7 @@ int Context::sendAckPackets(uint64_t current_ts) {
             continue;
         handle.session = uint8_t(session.first % 256);
         handle.cmd = PKT_CMD_ACK;
-        handle.wnd = queue.getWndSize();
+        handle.wnd = queue.getAvailableWndSize();
         handle.sn = queue.getAckSN();
         handle.ts = queue.getLastTS();
         handle.inflight = true;

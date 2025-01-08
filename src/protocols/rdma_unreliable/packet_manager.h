@@ -260,6 +260,8 @@ class ReceiveQueue {
 
     uint16_t getWndSize() const { return wnd_size_; }
 
+    uint16_t getAvailableWndSize() const;
+
    private:
     int fillPrimaryQueue();
 

@@ -457,6 +457,10 @@ int ReceiveQueue::getIndexRange(uint64_t &head, uint64_t &tail) {
     return 0;
 }
 
+uint16_t ReceiveQueue::getAvailableWndSize() const {
+    return wnd_size_ - (head_ - tail_);
+}
+
 PacketManager::PacketManager(size_t mtu_size, size_t max_packets,
                              size_t queue_capacity, size_t wnd_size)
     : mtu_size_(mtu_size),
