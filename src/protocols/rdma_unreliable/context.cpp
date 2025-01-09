@@ -232,6 +232,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
         uint64_t head, tail;
         auto &send_queue = packet_manager_.getSendQueue(session.first);
         send_queue.getIndexRange(head, tail);
+        head = std::min(head, tail + session.second.cwnd);
         for (auto curr = tail; curr < head; curr++) {
             auto &handle = send_queue.getMutableEntry(curr);
             if (current_ts - handle.ts < recv_rto_) continue;
@@ -296,7 +297,10 @@ int Context::sendAckPackets(uint64_t current_ts) {
             continue;
         handle.session = uint8_t(session.first % 256);
         handle.cmd = PKT_CMD_ACK;
-        handle.wnd = queue.getAvailableWndSize();
+        uint64_t head, tail;
+        const static uint64_t kMinWindowSize = 8;
+        queue.getIndexRange(head, tail);
+        handle.wnd = std::max(head - tail, kMinWindowSize);
         handle.sn = queue.getAckSN();
         handle.ts = queue.getLastTS();
         handle.inflight = true;
