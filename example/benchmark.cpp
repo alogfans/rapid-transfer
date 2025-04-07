@@ -136,29 +136,33 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
 
     pthread_barrier_wait(barrier);
     size_t chunk_size = FLAGS_block_size;
-    while (g_running) {
+
+    // Initial
+    TaskID task_id_list[FLAGS_depth];
+    for (size_t depth = 0; depth < FLAGS_depth; depth++) {
         uint16_t port = FLAGS_first_port + lrand48() % FLAGS_threads;
         auto target = FLAGS_target_hostname + ":" + std::to_string(port);
-        TaskID task_id_list[FLAGS_depth];
+        task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
+        if (task_id_list[depth] < 0) {
+            LOG(ERROR) << "Cannot post send request";
+            return -1;
+        }
+    }
+
+    while (g_running) {
         for (size_t depth = 0; depth < FLAGS_depth; depth++) {
-            task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
-            if (task_id_list[depth] < 0) {
-                LOG(ERROR) << "Cannot post send request";
+            auto status = engine->getStatus(task_id_list[depth], nullptr);
+            if (status == rapid::FAILED) {
+                LOG(ERROR) << "Failed to send data to remote";
                 break;
             }
-        }
-
-        for (size_t depth = 0; depth < FLAGS_depth; depth++) {
-            while (g_running) {
-                auto status = engine->getStatus(task_id_list[depth], nullptr);
-                if (status == rapid::FAILED) {
-                    LOG(ERROR) << "Failed to send data to remote";
-                    break;
-                }
-                if (status == rapid::SUCCESS) break;
+            if (status == rapid::SUCCESS) {
+                engine->freeTask(task_id_list[depth]);
+                uint16_t port = FLAGS_first_port + lrand48() % FLAGS_threads;
+                auto target = FLAGS_target_hostname + ":" + std::to_string(port);
+                task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
+                transferred_bytes += chunk_size;
             }
-            engine->freeTask(task_id_list[depth]);
-            transferred_bytes += chunk_size;
         }
     }
     pthread_barrier_wait(barrier);
