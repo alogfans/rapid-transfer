@@ -99,12 +99,14 @@ TaskID Context::send(const std::string &peer_name,
         int ret = packet_manager_.getPool().allocatePacket(
             active_session_map_[session].ack_handle);
         if (ret) return ret;
+        active_session_map_[session].setup(packet_manager_, session);
     }
     uint32_t last_sn;
-    int ret = packet_manager_.getSendQueue(session).push(buffer_list, last_sn);
+    auto &queue = *active_session_map_[session].send_queue;
+    int ret = queue.push(buffer_list, last_sn);
     if (ret) return ret;
     int task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
-    task_map_[task_id] = Task{session, last_sn, true};
+    task_map_[task_id] = Task{session, last_sn, true, &queue};
     return task_id;
 }
 
@@ -119,13 +121,14 @@ TaskID Context::receive(const std::string &peer_name,
         int ret = packet_manager_.getPool().allocatePacket(
             active_session_map_[session].ack_handle);
         if (ret) return ret;
+        active_session_map_[session].setup(packet_manager_, session);
     }
     uint32_t last_sn;
-    int ret =
-        packet_manager_.getReceiveQueue(session).push(buffer_list, last_sn);
+    auto &queue = *active_session_map_[session].receive_queue;
+    int ret = queue.push(buffer_list, last_sn);
     if (ret) return ret;
     int task_id = next_task_id_.fetch_add(1);
-    task_map_[task_id] = Task{session, last_sn, false};
+    task_map_[task_id] = Task{session, last_sn, false, &queue};
     return task_id;
 }
 
@@ -133,7 +136,7 @@ Status Context::getStatus(TaskID task_id, size_t *transferred_bytes) {
     if (!task_map_.count(task_id)) return Status::UNKNOWN;
     auto &task = task_map_[task_id];
     if (task.is_send) {
-        auto &queue = packet_manager_.getSendQueue(task.session);
+        auto &queue = *(SendQueue *) task.queue;
         auto ack_sn = queue.getAckSN();
         auto next_sn = queue.getNextSN();
         if (ack_sn <= next_sn) {
@@ -142,7 +145,7 @@ Status Context::getStatus(TaskID task_id, size_t *transferred_bytes) {
             if (task.last_sn >= next_sn) return Status::SUCCESS;
         }
     } else {
-        auto &queue = packet_manager_.getReceiveQueue(task.session);
+        auto &queue = *(ReceiveQueue *) task.queue;
         auto ack_sn = queue.getAckSN();
         auto next_sn = queue.getNextSN();
         if (ack_sn <= next_sn) {
@@ -230,7 +233,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
         std::vector<Request *> request_list;
         std::shared_ptr<RdmaUDEndPoint> endpoint;
         uint64_t head, tail;
-        auto &send_queue = packet_manager_.getSendQueue(session.first);
+        auto &send_queue = *session.second.send_queue;
         send_queue.getIndexRange(head, tail);
         head = std::min(head, tail + session.second.cwnd);
         for (auto curr = tail; curr < head; curr++) {
@@ -290,7 +293,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
 
 int Context::sendAckPackets(uint64_t current_ts) {
     for (auto &session : active_session_map_) {
-        auto &queue = packet_manager_.getReceiveQueue(session.first);
+        auto &queue = *session.second.receive_queue;
         PacketHandle &handle = session.second.ack_handle;
         if (session.second.ack_packets >= session.second.recv_packets ||
             handle.inflight)
@@ -345,20 +348,21 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
         int session =
             controller_.findSession(grh->sgid, wc.src_qp, handle.session);
         if (session >= 0) {
+            assert(active_session_map_.count(session));
             switch (handle.cmd) {
-                case PKT_CMD_DATA:
-                    packet_manager_.getReceiveQueue(session).markCompleted(
-                        handle);
+                case PKT_CMD_DATA: {
+                    auto &session_entry = active_session_map_[session];
+                    session_entry.receive_queue->markCompleted(handle);
                     stats_.recv_packets.fetch_add(1, std::memory_order_relaxed);
-                    if (active_session_map_.count(session))
-                        active_session_map_[session].recv_packets++;
+                    session_entry.recv_packets++;
                     break;
+                }
                 case PKT_CMD_ACK: {
-                    auto &send_queue = packet_manager_.getSendQueue(session);
-                    send_queue.markCompleted(handle.sn);
+                    auto &session_entry = active_session_map_[session];
+                    session_entry.send_queue->markCompleted(handle.sn);
                     auto rtt = (current_ts - handle.ts) & ((1ull << 48) - 1);
                     updateRTO(rtt);
-                    updateWndOnSuccess(session, handle.wnd, send_queue);
+                    updateWndOnSuccess(session, handle.wnd, *session_entry.send_queue);
                     break;
                 }
                 default:

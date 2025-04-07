@@ -62,6 +62,7 @@ class Context {
         int session;
         uint32_t last_sn;
         bool is_send;
+        void *queue;
     };
 
    private:
@@ -83,7 +84,10 @@ class Context {
               cwnd(1),
               rwnd(PacketManager::kWndSize),
               ssthresh(kMinSSThreshValue),
-              incr(0) {}
+              incr(0),
+              send_queue(nullptr),
+              receive_queue(nullptr),
+              mcast_send_queue(nullptr) {}
 
         PacketHandle ack_handle;
         uint64_t send_packets;
@@ -91,6 +95,16 @@ class Context {
         uint64_t ack_packets;
 
         uint32_t cwnd, rwnd, ssthresh, incr;
+
+        void setup(PacketManager &mgr, int sid) {
+            send_queue = &mgr.getSendQueue(sid);
+            receive_queue = &mgr.getReceiveQueue(sid);
+            mcast_send_queue = &mgr.getMcastSendQueue(sid);
+        }
+
+        SendQueue *send_queue;
+        ReceiveQueue *receive_queue;
+        McastSendQueue *mcast_send_queue;
     };
     std::unordered_map<int, SessionInfo> active_session_map_;
 
