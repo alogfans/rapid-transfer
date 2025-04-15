@@ -24,6 +24,7 @@
 #include <future>
 #include <iomanip>
 #include <thread>
+#include <random>
 
 #include "rapid_transfer.h"
 
@@ -139,8 +140,10 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
 
     // Initial
     TaskID task_id_list[FLAGS_depth];
+    std::uniform_int_distribution<int> dist;
+    std::mt19937 rng;
     for (size_t depth = 0; depth < FLAGS_depth; depth++) {
-        uint16_t port = FLAGS_first_port + lrand48() % FLAGS_threads;
+        uint16_t port = FLAGS_first_port + dist(rng) % FLAGS_threads;
         auto target = FLAGS_target_hostname + ":" + std::to_string(port);
         task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
         if (task_id_list[depth] < 0) {
@@ -158,7 +161,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
             }
             if (status == rapid::SUCCESS) {
                 engine->freeTask(task_id_list[depth]);
-                uint16_t port = FLAGS_first_port + lrand48() % FLAGS_threads;
+                uint16_t port = FLAGS_first_port + dist(rng) % FLAGS_threads;
                 auto target = FLAGS_target_hostname + ":" + std::to_string(port);
                 task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
                 transferred_bytes += chunk_size;

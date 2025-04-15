@@ -59,6 +59,8 @@ class PacketHandle {
 
     int deserialize(uint32_t imm_data, uint32_t packet_length);
 
+    int serialize(Buffer *slices, uint32_t &imm_data);
+
     int serialize(std::vector<Buffer> &slices, uint32_t &imm_data);
 
    public:

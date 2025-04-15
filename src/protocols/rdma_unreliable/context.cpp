@@ -135,24 +135,20 @@ TaskID Context::receive(const std::string &peer_name,
 Status Context::getStatus(TaskID task_id, size_t *transferred_bytes) {
     if (!task_map_.count(task_id)) return Status::UNKNOWN;
     auto &task = task_map_[task_id];
+    uint32_t ack_sn, next_sn;
     if (task.is_send) {
         auto &queue = *(SendQueue *) task.queue;
-        auto ack_sn = queue.getAckSN();
-        auto next_sn = queue.getNextSN();
-        if (ack_sn <= next_sn) {
-            if (task.last_sn <= ack_sn) return Status::SUCCESS;
-        } else {
-            if (task.last_sn >= next_sn) return Status::SUCCESS;
-        }
+        ack_sn = queue.getAckSN();
+        next_sn = queue.getNextSN();
     } else {
         auto &queue = *(ReceiveQueue *) task.queue;
-        auto ack_sn = queue.getAckSN();
-        auto next_sn = queue.getNextSN();
-        if (ack_sn <= next_sn) {
-            if (task.last_sn <= ack_sn) return Status::SUCCESS;
-        } else {
-            if (task.last_sn >= next_sn) return Status::SUCCESS;
-        }
+        ack_sn = queue.getAckSN();
+        next_sn = queue.getNextSN();
+    }
+    if (ack_sn <= next_sn) {
+        if (task.last_sn <= ack_sn) return Status::SUCCESS;
+    } else {
+        if (task.last_sn >= next_sn) return Status::SUCCESS;
     }
     return Status::PENDING;
 }
@@ -185,9 +181,10 @@ int Context::unregisterLocalMemory(void *addr) {
 int Context::submitNormalRecvWR(PacketHandle &handle) {
     auto &endpoint_store = controller_.endpointStore();
     int index = recv_handles_qp_index_map_[handle.getRawPacket()];
-    Request *request = new Request{.addr = {handle.getRawPacket()},
-                                   .length = {packet_manager_.mtuSize()},
-                                   .lkey = {local_arena_lkey_}};
+    Request *request = request_cache_.allocate();
+    new (request) Request{.addr = {handle.getRawPacket()},
+                          .length = {packet_manager_.mtuSize()},
+                          .lkey = {local_arena_lkey_}};
     return endpoint_store.postReceiveRequest({request}, index);
 }
 
@@ -220,51 +217,56 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
             LOG(ERROR) << "Process received packet failed";
         }
 
-        delete request;
+        request_cache_.deallocate(request);
     }
 
     return nr_poll;
 }
 
+thread_local uint64_t tl_resend = 0;
+thread_local uint64_t tl_total = 0;
+
 int Context::sendDataPackets(uint64_t current_ts) {
     const static size_t kRequestBatchSize = 4;
     auto &context = controller_.context();
+    Buffer slices[2];
     for (auto session : active_session_map_) {
+        if (current_ts - session.second.last_send_ts < recv_rto_ * 2 / 3)
+            continue;
         std::vector<Request *> request_list;
         std::shared_ptr<RdmaUDEndPoint> endpoint;
         uint64_t head, tail;
         auto &send_queue = *session.second.send_queue;
         send_queue.getIndexRange(head, tail);
         head = std::min(head, tail + session.second.cwnd);
-        for (auto curr = tail; curr < head; curr++) {
+        bool skip_remaining = false;
+        for (auto curr = tail; !skip_remaining && curr < head; curr++) {
             auto &handle = send_queue.getMutableEntry(curr);
-            if (current_ts - handle.ts < recv_rto_) continue;
+            if (current_ts - handle.ts < recv_rto_) {
+                skip_remaining = true;
+                continue;
+            }
             if (handle.ts) {
+                tl_resend++;
                 session.second.ssthresh =
                     std::max(kMinSSThreshValue, session.second.cwnd / 2);
                 session.second.cwnd = session.second.ssthresh + kResendValue;
                 session.second.incr = mtu_size_;
                 send_queue.setWndSize(session.second.cwnd);
             }
+            tl_total++;
+            // if (tl_total % 100000 == 0)
+            //     LOG(INFO) << tl_resend << "/" << tl_total;
             handle.ts = current_ts;
-            std::vector<Buffer> slices;
+            session.second.last_send_ts = current_ts;
             uint32_t imm_data;
             if (handle.serialize(slices, imm_data)) return -1;
-            Request *request = nullptr;
-            if (slices.size() == 1)
-                request = new Request{.addr = {slices[0].addr},
-                                      .length = {slices[0].length},
-                                      .lkey = {local_arena_lkey_},
-                                      .imm_data = imm_data};
-            else if (slices.size() == 2)
-                request =
-                    new Request{.addr = {slices[0].addr, slices[1].addr},
-                                .length = {slices[0].length, slices[1].length},
-                                .lkey = {local_arena_lkey_,
-                                         context.key(slices[1].addr).first},
-                                .imm_data = imm_data};
-            else
-                continue;
+            Request *request = request_cache_.allocate();
+            new (request) Request{.addr = {slices[0].addr, slices[1].addr},
+                                  .length = {slices[0].length, slices[1].length},
+                                  .lkey = {local_arena_lkey_,
+                                           context.key(slices[1].addr).first},
+                                  .imm_data = imm_data};
 
             if (!endpoint) {
                 endpoint = controller_.getOrCreateEndpoint(session.first);
@@ -292,6 +294,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
 }
 
 int Context::sendAckPackets(uint64_t current_ts) {
+    Buffer slices[2];
     for (auto &session : active_session_map_) {
         auto &queue = *session.second.receive_queue;
         PacketHandle &handle = session.second.ack_handle;
@@ -307,18 +310,15 @@ int Context::sendAckPackets(uint64_t current_ts) {
         handle.sn = queue.getAckSN();
         handle.ts = queue.getLastTS();
         handle.inflight = true;
-        std::vector<Buffer> slices;
         uint32_t imm_data;
         if (handle.serialize(slices, imm_data)) return -1;
-        Request *request = nullptr;
-        if (slices.size() == 1)
-            request = new Request{.addr = {slices[0].addr},
-                                  .length = {slices[0].length},
-                                  .lkey = {local_arena_lkey_},
-                                  .imm_data = imm_data,
-                                  .context = &handle};
-        else
-            return -1;
+        Request *request = request_cache_.allocate();
+        new (request) Request{.addr = {slices[0].addr},
+                              .length = {slices[0].length},
+                              .lkey = {local_arena_lkey_},
+                              .imm_data = imm_data,
+                              .context = &handle};
+
         auto endpoint = controller_.getOrCreateEndpoint(session.first);
         if (!endpoint) return -1;
         int ret = endpoint->postSendRequest({request});

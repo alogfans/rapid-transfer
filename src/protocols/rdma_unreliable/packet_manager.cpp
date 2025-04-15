@@ -77,6 +77,34 @@ int PacketHandle::deserialize(uint32_t imm_data, uint32_t packet_length) {
     return decode();
 }
 
+int PacketHandle::serialize(Buffer *slices, uint32_t &imm_data) {
+    auto &handle = *this;
+    if (!handle.packet_buf) {
+        LOG(ERROR) << "unable to get stream: packet buf not specified";
+        return -1;
+    }
+    if (with_grh) {
+        LOG(ERROR) << "refuse to send packet with GRH field";
+        return -1;
+    }
+    if (encode()) return -1;
+    imm_data = handle.pkt_hdr_imm.raw;
+    if (!handle.data_buf) {
+        // 1. no attach data
+        // 2a. 2a. has attach data, w/o zero copy
+        slices[0] = Buffer{.addr = handle.packet_buf,
+                           .length = sizeof(PktHdr) + handle.data_len};
+        slices[1] = Buffer{.addr = nullptr, .length = 0};
+    } else {
+        // 2b. has attach data, w/ zero copy
+        slices[0] = 
+            Buffer{.addr = handle.packet_buf, .length = sizeof(PktHdr)};
+        slices[1] = 
+            Buffer{.addr = handle.data_buf, .length = handle.data_len};
+    }
+    return 0;
+}
+
 int PacketHandle::serialize(std::vector<Buffer> &slices, uint32_t &imm_data) {
     auto &handle = *this;
     if (!handle.packet_buf) {

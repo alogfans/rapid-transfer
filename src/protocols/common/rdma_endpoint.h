@@ -23,6 +23,50 @@ struct Request {
     void *context = nullptr;
 };
 
+struct RequestCache {
+    RequestCache() : head_(0), tail_(0) {
+        lazy_delete_requests_.resize(kLazyDeleteRequestCapacity);
+    }
+
+    ~RequestCache() {
+        for (uint64_t i = tail_; i != head_; i++) {
+            auto slice = lazy_delete_requests_[i % kLazyDeleteRequestCapacity];
+            delete slice;
+            freed_++;
+        }
+        if (allocated_ != freed_) {
+            LOG(WARNING) << "detected slice leak: allocated "
+                         << allocated_ << " freed " << freed_;
+        }
+    }
+
+    Request *allocate() {
+        if (head_ - tail_ == 0) {
+            allocated_++;
+            return new Request();
+        }
+        auto request = lazy_delete_requests_[tail_ % kLazyDeleteRequestCapacity];
+        tail_++;
+        new (request) Request();
+        return request;
+    }
+
+    void deallocate(Request *request) {
+        if (head_ - tail_ == kLazyDeleteRequestCapacity) {
+            delete request;
+            freed_++;
+            return;
+        }
+        lazy_delete_requests_[head_ % kLazyDeleteRequestCapacity] = request;
+        head_++;
+    }
+
+    const static size_t kLazyDeleteRequestCapacity = 4096;
+    std::vector<Request *> lazy_delete_requests_;
+    uint64_t head_, tail_;
+    uint64_t allocated_ = 0, freed_ = 0;
+};
+
 struct RdmaEndPoint {
     RdmaEndPoint() {}
 

@@ -87,7 +87,8 @@ class Context {
               incr(0),
               send_queue(nullptr),
               receive_queue(nullptr),
-              mcast_send_queue(nullptr) {}
+              mcast_send_queue(nullptr),
+              last_send_ts(0) {}
 
         PacketHandle ack_handle;
         uint64_t send_packets;
@@ -105,12 +106,13 @@ class Context {
         SendQueue *send_queue;
         ReceiveQueue *receive_queue;
         McastSendQueue *mcast_send_queue;
+        uint64_t last_send_ts;
     };
     std::unordered_map<int, SessionInfo> active_session_map_;
 
-    const static size_t kDefaultRTO = 8196;  // 8us
-    const static size_t kMinRTO = 64;
-    const static size_t kMaxRTO = 8196 * 2;
+    const static size_t kDefaultRTO = 4096;  // 8us
+    const static size_t kMinRTO = 128;
+    const static size_t kMaxRTO = 8196;
     uint64_t recv_srtt_ = 0, recv_rttval_ = 0, recv_rto_ = kDefaultRTO;
     uint32_t local_arena_lkey_;
 
@@ -126,6 +128,7 @@ class Context {
     };
 
     Stats stats_;
+    RequestCache request_cache_;
 };
 }  // namespace rapid
 

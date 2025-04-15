@@ -357,6 +357,8 @@ int ContextMcast::pollMcastCompletedPackets(
 }
 
 int ContextMcast::sendDataPackets(uint64_t current_ts) {
+    std::vector<Buffer> slices;
+    slices.reserve(2);
     for (auto session : active_session_map_) {
         auto context = controller_.getMulticastContext(session.first);
         if (!context) continue;
@@ -372,7 +374,7 @@ int ContextMcast::sendDataPackets(uint64_t current_ts) {
                 send_queue.setWndSize(session.second.cwnd);
             }
             handle.ts = current_ts;
-            std::vector<Buffer> slices;
+            slices.clear();
             uint32_t imm_data;
             if (handle.serialize(slices, imm_data)) return -1;
             Request *request = nullptr;
@@ -415,6 +417,8 @@ int ContextMcast::sendDataPackets(uint64_t current_ts) {
 }
 
 int ContextMcast::sendAckPackets(uint64_t current_ts) {
+    std::vector<Buffer> slices;
+    slices.reserve(2);
     for (auto &session : active_session_map_) {
         auto &queue = *session.second.receive_queue;
         PacketHandle &handle = session.second.ack_handle;
@@ -427,7 +431,7 @@ int ContextMcast::sendAckPackets(uint64_t current_ts) {
         handle.sn = queue.getAckSN();
         handle.ts = queue.getLastTS();
         handle.inflight = true;
-        std::vector<Buffer> slices;
+        slices.clear();
         uint32_t imm_data;
         if (handle.serialize(slices, imm_data)) return -1;
         Request *request = nullptr;
