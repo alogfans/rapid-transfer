@@ -92,6 +92,7 @@ int receiveThread(int thread_id) {
 
     while (true) {
         mutex.lock();
+        engine->runStep();
         for (auto &entry : task_id_map) {
             auto status = engine->getStatus(entry.second, nullptr);
             if (status == rapid::FAILED) {
@@ -114,6 +115,16 @@ int receiveThread(int thread_id) {
 
 std::atomic<bool> g_running = true;
 std::atomic<uint64_t> g_transferred_bytes = 0;
+
+std::vector<std::string> extractTargetHostName() {
+    std::vector<std::string> result;
+    std::stringstream ss(FLAGS_target_hostname);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        result.push_back(item);
+    }
+    return result;
+}
 
 int sendThread(pthread_barrier_t *barrier, int thread_id) {
     auto engine = rapid::RapidTransfer::Create(
@@ -138,13 +149,16 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
     pthread_barrier_wait(barrier);
     size_t chunk_size = FLAGS_block_size;
 
+    auto target_hostname_list = extractTargetHostName();
+
     // Initial
     TaskID task_id_list[FLAGS_depth];
     std::uniform_int_distribution<int> dist;
     std::mt19937 rng;
     for (size_t depth = 0; depth < FLAGS_depth; depth++) {
         uint16_t port = FLAGS_first_port + dist(rng) % FLAGS_threads;
-        auto target = FLAGS_target_hostname + ":" + std::to_string(port);
+        auto hostname = target_hostname_list[dist(rng) % target_hostname_list.size()];
+        auto target = hostname + ":" + std::to_string(port);
         task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
         if (task_id_list[depth] < 0) {
             LOG(ERROR) << "Cannot post send request";
@@ -153,6 +167,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
     }
 
     while (g_running) {
+        engine->runStep();
         for (size_t depth = 0; depth < FLAGS_depth; depth++) {
             auto status = engine->getStatus(task_id_list[depth], nullptr);
             if (status == rapid::FAILED) {
@@ -162,7 +177,8 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
             if (status == rapid::SUCCESS) {
                 engine->freeTask(task_id_list[depth]);
                 uint16_t port = FLAGS_first_port + dist(rng) % FLAGS_threads;
-                auto target = FLAGS_target_hostname + ":" + std::to_string(port);
+                auto hostname = target_hostname_list[dist(rng) % target_hostname_list.size()];
+                auto target = hostname + ":" + std::to_string(port);
                 task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
                 transferred_bytes += chunk_size;
             }

@@ -107,6 +107,10 @@ int RapidTransfer::unregisterLocalMemory(void *addr) {
     return protocol_->unregisterLocalMemory(addr);
 }
 
+int RapidTransfer::runStep() {
+    return protocol_->runStep();
+}
+
 int RapidTransfer::startListener(const std::string &listen_address,
                                  const OnConnectionStateChange &callback) {
     auto on_accept = [=](const std::string &peer_name,

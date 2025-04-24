@@ -59,6 +59,8 @@ struct Protocol {
     virtual int registerLocalMemory(void *addr, size_t length) = 0;
 
     virtual int unregisterLocalMemory(void *addr) = 0;
+
+    virtual int runStep() { return 0; }
 };
 }  // namespace rapid
 

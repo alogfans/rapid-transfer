@@ -44,6 +44,11 @@ int RdmaUnreliableProtocol::deconstruct() {
     return context_.deconstruct();
 }
 
+int RdmaUnreliableProtocol::runStep() {
+    // if (!spawn_worker_) return context_.runStep();
+    return 0;
+}
+
 int RdmaUnreliableProtocol::prepareConnection(const std::string &peer_name,
                                               Attributes &local) {
     return context_.prepareConnection(peer_name, local);
@@ -101,15 +106,11 @@ int RdmaUnreliableProtocol::setMulticastReplicas(
 }
 
 int RdmaUnreliableProtocol::doEventLoop(int64_t timeout) {
-    thread_local uint64_t step_count = 0;
-    if ((++step_count) % 8) return 0;  // drop requests
-    do {
-        int rc = context_.runStep();
-        if (rc) {
-            LOG(WARNING) << "worker terminated unexceptedly";
-            return rc;
-        }
-    } while (timeout < 0);
-    return 0;
+    thread_local uint64_t last_ts = 4000;
+    uint64_t current_ts  = getCurrentTimeInNano();
+    const static uint64_t kThreshold = 0; // 1us
+    if (current_ts - last_ts < kThreshold) return 0;  // drop requests
+    last_ts = current_ts;
+    return context_.runStep();
 }
 }  // namespace rapid

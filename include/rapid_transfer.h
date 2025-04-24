@@ -94,6 +94,8 @@ class RapidTransfer {
     // Stop listen thread
     int shutdownListener();
 
+    int runStep();
+
    private:
     int makeConnectionIfNeeded(const std::string &peer_name);
 
