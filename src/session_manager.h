@@ -8,9 +8,13 @@
 
 #include <atomic>
 #include <thread>
+#include <unordered_set>
 
 #include "concurrency.h"
 #include "rapid_transfer.h"
+
+#include <ylt/coro_rpc/coro_rpc_server.hpp>
+#include <ylt/coro_rpc/coro_rpc_client.hpp>
 
 namespace rapid {
 using Attributes = std::unordered_map<std::string, std::string>;
@@ -22,7 +26,7 @@ class SessionManager {
 
     using OnErrorCallback = std::function<void(const std::string &)>;
 
-    SessionManager() : listen_running_(false), listen_fd_(-1) {}
+    SessionManager() {}
 
     virtual ~SessionManager();
     SessionManager(const SessionManager &) = delete;
@@ -44,30 +48,19 @@ class SessionManager {
     bool isMulticastAddress(const std::string &address);
 
    private:
-    void listener();
+    std::string exchangeMetadata(std::string request_json);
 
-    int makeConnect(const std::string &address);
+    int readAttributes(const std::string &str, Attributes &attr);
 
-    int sendRPC(int fd, const Attributes &request, Attributes &response);
-
-    int readAttributes(int fd, Attributes &attr);
-
-    int writeAttributes(int fd, const Attributes &attr);
+    int writeAttributes(std::string &str, const Attributes &attr);
 
    private:
-    struct Session {
-        int fd;
-    };
-
-    std::atomic<bool> listen_running_;
-    int listen_fd_;
-    std::thread listen_thread_;
-
+    coro_rpc::coro_rpc_server *server_ = nullptr;
     OnAcceptCallback on_accept_;
     OnErrorCallback on_error_;
 
-    RWSpinlock session_map_lock_;
-    std::unordered_map<std::string, Session> session_map_;
+    RWSpinlock sessions_lock_;
+    std::unordered_set<std::string> sessions_;
 };
 }  // namespace rapid
 
