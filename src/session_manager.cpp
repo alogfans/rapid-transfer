@@ -39,15 +39,16 @@ SessionManager::~SessionManager() {
 std::string SessionManager::exchangeMetadata(std::string request_json) {
     Attributes request, response;
     if (readAttributes(request_json, request)) return "<error>";
-    if (on_accept_("<undefined>", request, response)) return "<error>";
+    if (on_accept_("server/" + std::to_string(uid_.fetch_add(1)), request, response)) return "<error>";
     std::string response_json;
-    if (writeAttributes(request_json, response)) return "<error>";
-    return request_json;
+    if (writeAttributes(response_json, response)) return "<error>";
+    return response_json;
 }
 
 int SessionManager::startListener(const std::string &address,
                                   const OnAcceptCallback &on_accept,
                                   const OnErrorCallback &on_close) {
+    on_accept_ = on_accept;
     std::string hostname;
     uint16_t port;
     if (parseHostPort(address, hostname, port)) {
@@ -56,14 +57,21 @@ int SessionManager::startListener(const std::string &address,
     }
     server_ = new coro_rpc::coro_rpc_server(1, port);
     server_->register_handler<&SessionManager::exchangeMetadata>(this);
-    coro_rpc::err_code err = server_->start();
-    if (err) return -1;
+    thread_ = std::thread([&]() {
+        coro_rpc::err_code err = server_->start();
+        if (err) return -1;
+        return 0;
+    });
     return 0;
 }
 
 int SessionManager::shutdownListener() {
-    delete server_;
-    server_ = nullptr;
+    if (server_) {
+        server_->stop();
+        thread_.join();
+        delete server_;
+        server_ = nullptr;
+    }
     return 0;
 }
 
@@ -83,8 +91,7 @@ int SessionManager::connect(const std::string &address,
         [&]() -> async_simple::coro::Lazy<std::optional<std::string>> {
             auto result = co_await co_await request_result;
             if (!result) {
-                LOG(ERROR) << "Failed to get replica list: "
-                           << result.error().msg;
+                LOG(ERROR) << "Failed to handshake: " << result.error().msg;
                 co_return "";
             }
             co_return result->result();

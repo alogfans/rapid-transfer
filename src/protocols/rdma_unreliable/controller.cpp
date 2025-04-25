@@ -162,8 +162,9 @@ void Controller::registerNode(const std::string &peer_addr, ibv_gid &gid,
 
 int Controller::findSession(ibv_gid &gid, uint32_t qp_num, uint8_t session) {
     RWSpinlock::ReadGuard guard(session_lock_);
-    NodeAddress p{gid, qp_num};
-    if (node_id_map_.count(p)) return node_id_map_[p] * 256 + session;
+    for (auto &entry : node_id_map_) if (entry.first.qp_num == qp_num) return entry.second * 256 + session;
+    // NodeAddress p{gid, qp_num};
+    // if (node_id_map_.count(p)) return node_id_map_[p] * 256 + session;
     return -1;
 }
 

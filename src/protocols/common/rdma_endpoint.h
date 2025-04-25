@@ -34,10 +34,10 @@ struct RequestCache {
             delete slice;
             freed_++;
         }
-        if (allocated_ != freed_) {
-            LOG(WARNING) << "detected slice leak: allocated "
-                         << allocated_ << " freed " << freed_;
-        }
+        // if (allocated_ != freed_) {
+        //     LOG(WARNING) << "detected slice leak: allocated "
+        //                  << allocated_ << " freed " << freed_;
+        // }
     }
 
     Request *allocate() {
