@@ -61,7 +61,8 @@ std::vector<std::string> listDevices() {
         PLOG(ERROR) << "ibv_get_device_list failed";
         return {};
     }
-    for (int i = 0; i < num_devices; ++i) {
+    for (int i = 0; i < 1; ++i) {
+    // for (int i = 0; i < num_devices; ++i) {
         device_name_list.push_back(ibv_get_device_name(devices[i]));
     }
     ibv_free_device_list(devices);
@@ -80,8 +81,9 @@ static inline int64_t getCurrentTimeInNano() {
 static std::vector<std::string> device_name_list = listDevices();
 
 int receiveThread(int thread_id) {
+    int group_id = thread_id % device_name_list.size();
     uint16_t port = FLAGS_first_port + thread_id;
-    auto device = device_name_list[thread_id % device_name_list.size()];
+    auto device = device_name_list[group_id];
     auto engine = rapid::RapidTransfer::Create(
         FLAGS_protocol, device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
@@ -143,6 +145,7 @@ int receiveThread(int thread_id) {
     return 0;
 }
 
+std::atomic<uint64_t> g_ready_threads = 0;
 std::atomic<bool> g_running = true;
 std::atomic<uint64_t> g_transferred_bytes = 0;
 
@@ -157,7 +160,8 @@ std::vector<std::string> extractTargetHostName() {
 }
 
 int sendThread(pthread_barrier_t *barrier, int thread_id) {
-    auto device = device_name_list[thread_id % device_name_list.size()];
+    int group_id = thread_id % device_name_list.size();
+    auto device = device_name_list[group_id];
     auto engine = rapid::RapidTransfer::Create(
         FLAGS_protocol, device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
@@ -177,23 +181,75 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
         return -1;
     }
 
-    pthread_barrier_wait(barrier);
     size_t chunk_size = FLAGS_block_size;
-
     auto target_hostname_list = extractTargetHostName();
+
+    // warming up
+    {
+        TaskID task_id;
+        for (auto port = FLAGS_first_port + group_id; 
+            port < FLAGS_first_port + FLAGS_threads; 
+            port += device_name_list.size()) {
+            auto hostname = target_hostname_list[0];
+            auto target = hostname + ":" + std::to_string(port);
+            while (true) {
+                task_id = engine->send(target, {{addr, chunk_size}});
+                if (task_id < 0) {
+                    usleep(1000);
+                } else {
+                    break;
+                }
+            }
+            bool done = false;
+            auto start = getCurrentTimeInNano();
+            while (!done) {
+                engine->runStep();
+                auto now = getCurrentTimeInNano();
+                if (now - start > 10000000000) {
+                    LOG(INFO) << thread_id << " to " << port - FLAGS_first_port << " possibily failed";
+                    exit(0);
+                }
+                auto status = engine->getStatus(task_id, nullptr);
+                if (status == rapid::FAILED) {
+                    LOG(ERROR) << "Failed to send data to remote";
+                    return -1;
+                }
+                if (status == rapid::SUCCESS) {
+                    engine->freeTask(task_id);
+                    done = true;
+                }
+            }
+        }
+    }
+    
+    LOG(INFO) << g_ready_threads.fetch_add(1) + 1 << "/" << FLAGS_threads << " thread ready";
+    pthread_barrier_wait(barrier);
 
     // Initial
     TaskID task_id_list[FLAGS_depth];
     std::uniform_int_distribution<int> dist;
     std::mt19937 rng;
+
+    size_t device_count = device_name_list.size(); 
+    size_t class_count = (FLAGS_threads + device_count - 1) / device_count;
+    auto selectPeerIndex = [&]() -> int {
+        /*
+        group_id, FLAGS_threads, += device_count
+        */
+        auto raw_index = group_id + device_count * (dist(rng) % class_count);
+        auto index = std::min((int)FLAGS_threads - 1, (int) raw_index);
+        assert((index - group_id) % device_count == 0);
+        return index;
+    };
+
     for (size_t depth = 0; depth < FLAGS_depth; depth++) {
-        uint16_t port = FLAGS_first_port + dist(rng) % FLAGS_threads;
+        uint16_t port = FLAGS_first_port + selectPeerIndex();
         auto hostname = target_hostname_list[dist(rng) % target_hostname_list.size()];
         auto target = hostname + ":" + std::to_string(port);
         while (true) {
             task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
             if (task_id_list[depth] < 0) {
-                usleep(100000);
+                usleep(1000);
             } else {
                 break;
             }
@@ -210,13 +266,13 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
             }
             if (status == rapid::SUCCESS) {
                 engine->freeTask(task_id_list[depth]);
-                uint16_t port = FLAGS_first_port + dist(rng) % FLAGS_threads;
+                uint16_t port = FLAGS_first_port + selectPeerIndex();
                 auto hostname = target_hostname_list[dist(rng) % target_hostname_list.size()];
                 auto target = hostname + ":" + std::to_string(port);
                 while (true) {
                     task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
                     if (task_id_list[depth] < 0) {
-                        usleep(100000);
+                        usleep(1000);
                     } else {
                         break;
                     }

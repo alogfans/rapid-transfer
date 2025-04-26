@@ -162,9 +162,21 @@ void Controller::registerNode(const std::string &peer_addr, ibv_gid &gid,
 
 int Controller::findSession(ibv_gid &gid, uint32_t qp_num, uint8_t session) {
     RWSpinlock::ReadGuard guard(session_lock_);
-    for (auto &entry : node_id_map_) if (entry.first.qp_num == qp_num) return entry.second * 256 + session;
-    // NodeAddress p{gid, qp_num};
-    // if (node_id_map_.count(p)) return node_id_map_[p] * 256 + session;
+    auto device_name = context_.deviceName();
+    if (device_name.find("mlx5_bond") != device_name.npos) {
+        int ans_cnt = 0;
+        int index = -1;
+        for (auto &entry : node_id_map_) 
+            if (entry.first.qp_num == qp_num) {
+                index = entry.second * 256 + session;
+                ans_cnt++;
+            }
+        assert(ans_cnt <= 1);
+        return index;
+    } else {
+        NodeAddress p{gid, qp_num};
+        if (node_id_map_.count(p)) return node_id_map_[p] * 256 + session;
+    }
     return -1;
 }
 
