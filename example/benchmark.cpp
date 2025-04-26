@@ -61,8 +61,7 @@ std::vector<std::string> listDevices() {
         PLOG(ERROR) << "ibv_get_device_list failed";
         return {};
     }
-    for (int i = 0; i < 1; ++i) {
-    // for (int i = 0; i < num_devices; ++i) {
+    for (int i = 0; i < num_devices; ++i) {
         device_name_list.push_back(ibv_get_device_name(devices[i]));
     }
     ibv_free_device_list(devices);
@@ -188,8 +187,8 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
     {
         TaskID task_id;
         for (auto port = FLAGS_first_port + group_id; 
-            port < FLAGS_first_port + FLAGS_threads; 
-            port += device_name_list.size()) {
+                port < FLAGS_first_port + FLAGS_threads; 
+                port += device_name_list.size()) {
             auto hostname = target_hostname_list[0];
             auto target = hostname + ":" + std::to_string(port);
             while (true) {

@@ -13,9 +13,9 @@ namespace rapid {
 std::shared_ptr<RapidTransfer> RapidTransfer::Create(
     const std::string &protocol, const std::string &device_name,
     uint8_t rdma_port, int gid_index) {
-    size_t mtu_size = 4096;
-    size_t max_packets = 25600;
-    size_t queue_capacity = 512;
+    size_t mtu_size = 1024;
+    size_t max_packets = 409600;
+    size_t queue_capacity = 4096;
     if (getenv("RT_MTU_SIZE")) {
         mtu_size = std::atoi(getenv("RT_MTU_SIZE"));
     }

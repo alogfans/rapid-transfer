@@ -62,8 +62,6 @@ struct RdmaUnreliableProtocol : public Protocol {
 
     virtual int runStep();
 
-    int doEventLoop(int64_t timeout = -1);
-
    private:
     Context context_;
     const bool spawn_worker_;

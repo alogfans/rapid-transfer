@@ -47,8 +47,7 @@ int RdmaUDEndPoint::setupConnection(const std::string &peer_gid,
                                     uint16_t peer_lid,
                                     std::vector<uint32_t> peer_qp_num_list) {
     if (connected_) {
-        LOG(ERROR) << "Failed to post send request: already connected";
-        return -1;
+        return 0;
     }
     struct ibv_ah_attr ah_attr;
     memset(&ah_attr, 0, sizeof(ah_attr));
