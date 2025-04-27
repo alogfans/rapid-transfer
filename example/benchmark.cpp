@@ -53,7 +53,7 @@ static void *allocateMemoryPool(size_t size, int socket_id) {
 
 static void freeMemoryPool(void *addr, size_t size) { numa_free(addr, size); }
 
-std::vector<std::string> listDevices() {
+std::map<std::string, int> listDevices() {
     int num_devices = 0;
     std::vector<std::string> device_name_list;
     struct ibv_device **devices = ibv_get_device_list(&num_devices);
