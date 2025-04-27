@@ -148,13 +148,17 @@ int receiveThread(int thread_id) {
     }
 
     std::mutex mutex;
-    std::unordered_multimap<std::string, TaskID> task_id_map;
+    struct TaskEntry {
+        TaskID id;
+        int depth;
+    };
+    std::unordered_multimap<std::string, TaskEntry> task_id_map;
     auto on_new_connection = [&](const std::string &peer_name, bool is_join) {
         mutex.lock();
-        for (size_t depth = 0; depth < FLAGS_depth; ++depth) {
+        for (int depth = 0; depth < (int)FLAGS_depth; ++depth) {
             auto task_id =
                 engine->receive(peer_name, {{(char*)addr + depth * FLAGS_block_size, FLAGS_block_size}});
-            task_id_map.emplace(std::make_pair(peer_name, task_id));
+            task_id_map.emplace(std::make_pair(peer_name, TaskEntry{task_id, depth}));
         }
         mutex.unlock();
     };
@@ -170,21 +174,19 @@ int receiveThread(int thread_id) {
     while (true) {
         mutex.lock();
         engine->runStep();
-        int depth = 0;
         for (auto &entry : task_id_map) {
-            auto status = engine->getStatus(entry.second, nullptr);
+            auto status = engine->getStatus(entry.second.id, nullptr);
             if (status == rapid::FAILED) {
                 LOG(ERROR) << "Failed to send data to remote";
                 break;
             } else if (status == rapid::SUCCESS) {
-                engine->freeTask(entry.second);
+                engine->freeTask(entry.second.id);
                 // auto base = *((char *)addr);
                 // for (uint64_t i = 0; i < FLAGS_block_size; ++i)
                 //     assert(*((char *)addr + i) == char(base + i % 256));
-                entry.second =
-                    engine->receive(entry.first, {{(char*)addr + depth * FLAGS_block_size, FLAGS_block_size}});
+                entry.second.id =
+                    engine->receive(entry.first, {{(char*)addr + entry.second.depth * FLAGS_block_size, FLAGS_block_size}});
             }
-            depth++;
         }
         mutex.unlock();
     }
@@ -232,8 +234,10 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
     size_t chunk_size = FLAGS_block_size;
     auto target_hostname_list = extractTargetHostName();
 
+    static std::mutex g_mutex;
     // warming up
     {
+        std::lock_guard<std::mutex> lock(g_mutex);
         TaskID task_id;
         for (auto port = FLAGS_first_port + group_id; 
                 port < FLAGS_first_port + FLAGS_threads; 
@@ -281,13 +285,8 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
     size_t device_count = device_list.size(); 
     size_t class_count = (FLAGS_threads + device_count - 1) / device_count;
     auto selectPeerIndex = [&]() -> int {
-        /*
-        group_id, FLAGS_threads, += device_count
-        */
-        auto raw_index = group_id + device_count * (dist(rng) % class_count);
-        auto index = std::min((int)FLAGS_threads - 1, (int) raw_index);
-        assert((index - group_id) % device_count == 0);
-        return index;
+        auto base_index = device_count * (dist(rng) % class_count);
+        return std::min((int)FLAGS_threads - 1, int(group_id + base_index));
     };
 
     for (size_t depth = 0; depth < FLAGS_depth; depth++) {

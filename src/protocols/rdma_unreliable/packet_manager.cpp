@@ -232,7 +232,6 @@ int PacketBufferPool::allocatePacket(PacketHandle &handle, bool with_grh) {
     // RWSpinlock::WriteGuard guard(arena_lock_);
     void *packet_buf = global_free_buffer_;
     if (!packet_buf) {
-        LOG(ERROR) << "out of memory";
         return -1;
     }
     uintptr_t next = *(uintptr_t *)packet_buf;
@@ -300,9 +299,9 @@ int SendQueue::fillPrimaryQueue() {
     // including wrap-ups
     while (secondary_queue_.hasRemainingFragment() &&
            head_ - tail_ <= wnd_size_) {
-        auto slice = secondary_queue_.popFragment();
         auto &handle = handle_[head_ % queue_capacity_];
-        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return -1;
+        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return 0;
+        auto slice = secondary_queue_.popFragment();
         handle.session = session_;
         handle.cmd = PKT_CMD_DATA;
         handle.wnd = wnd_size_;
@@ -393,9 +392,9 @@ int McastSendQueue::fillPrimaryQueue() {
     // including wrap-ups
     while (secondary_queue_.hasRemainingFragment() &&
            head_ - getMinTailIndex() <= wnd_size_) {
-        auto slice = secondary_queue_.popFragment();
         auto &handle = handle_[head_ % queue_capacity_];
-        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return -1;
+        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return 0;
+        auto slice = secondary_queue_.popFragment();
         handle.session = session_;
         handle.cmd = PKT_CMD_DATA;
         handle.wnd = wnd_size_;
