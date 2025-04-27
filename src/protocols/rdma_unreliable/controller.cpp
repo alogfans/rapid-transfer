@@ -71,7 +71,7 @@ int Controller::deconstruct() {
 }
 
 int Controller::joinMulticast(const std::string &multicast_addr) {
-    RWSpinlock::WriteGuard guard(session_lock_);
+    // RWSpinlock::WriteGuard guard(session_lock_);
     if (multicast_context_map_.count(multicast_addr)) {
         LOG(ERROR) << "multicast address " << multicast_addr << " registered";
         return -1;
@@ -150,7 +150,7 @@ int Controller::setupConnection(const std::string &peer_addr,
 
 void Controller::registerNode(const std::string &peer_addr, ibv_gid &gid,
                               const std::vector<uint32_t> &qp_num_list) {
-    RWSpinlock::WriteGuard guard(session_lock_);
+    // RWSpinlock::WriteGuard guard(session_lock_);
     auto node_id = next_node_id_.fetch_add(1);
     for (auto qp_num : qp_num_list) {
         NodeAddress p{gid, qp_num};
@@ -161,7 +161,7 @@ void Controller::registerNode(const std::string &peer_addr, ibv_gid &gid,
 }
 
 int Controller::findSession(ibv_gid &gid, uint32_t qp_num, uint8_t session) {
-    RWSpinlock::ReadGuard guard(session_lock_);
+    // RWSpinlock::ReadGuard guard(session_lock_);
     auto device_name = context_.deviceName();
     if (device_name.find("mlx5_bond") != device_name.npos) {
         int ans_cnt = 0;
@@ -181,13 +181,13 @@ int Controller::findSession(ibv_gid &gid, uint32_t qp_num, uint8_t session) {
 }
 
 int Controller::findSession(const std::string &peer_addr, uint8_t session) {
-    RWSpinlock::ReadGuard guard(session_lock_);
+    // RWSpinlock::ReadGuard guard(session_lock_);
     if (!peer_name_map_.count(peer_addr)) return -1;
     return peer_name_map_[peer_addr] * 256 + session;
 }
 
 std::shared_ptr<RdmaUDEndPoint> Controller::getOrCreateEndpoint(int session) {
-    RWSpinlock::ReadGuard guard(session_lock_);
+    // RWSpinlock::ReadGuard guard(session_lock_);
     auto node_id = session / 256;
     if (!peer_name_rev_map_.count(node_id)) return nullptr;
     return endpoint_store_.getOrCreateEndpoint(peer_name_rev_map_[node_id]);
@@ -195,7 +195,7 @@ std::shared_ptr<RdmaUDEndPoint> Controller::getOrCreateEndpoint(int session) {
 
 std::shared_ptr<RdmaMulticastContext> Controller::getMulticastContext(
     int session) {
-    RWSpinlock::ReadGuard guard(session_lock_);
+    // RWSpinlock::ReadGuard guard(session_lock_);
     auto node_id = session / 256;
     if (!peer_name_rev_map_.count(node_id)) return nullptr;
     auto peer_name = peer_name_rev_map_[node_id];
@@ -206,7 +206,7 @@ std::shared_ptr<RdmaMulticastContext> Controller::getMulticastContext(
 }
 
 int Controller::redirectMulticast(int sid, int &index) {
-    RWSpinlock::ReadGuard guard(session_lock_);
+    // RWSpinlock::ReadGuard guard(session_lock_);
     int node_id = sid / 256;
     int session = sid % 256;
     for (auto &entry : multicast_context_map_) {

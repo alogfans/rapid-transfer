@@ -92,7 +92,7 @@ class PacketBufferPool {
     PacketBufferPool(const PacketBufferPool &) = delete;
     PacketBufferPool &operator=(const PacketBufferPool &) = delete;
 
-    int construct();
+    int construct(const std::string &device_name = "");
 
     int deconstruct();
 
@@ -295,7 +295,7 @@ class PacketManager {
     PacketManager(const PacketManager &) = delete;
     PacketManager &operator=(const PacketManager &) = delete;
 
-    int construct();
+    int construct(const std::string &device_name = "");
 
     int deconstruct();
 

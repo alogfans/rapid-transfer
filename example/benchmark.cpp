@@ -25,6 +25,7 @@
 #include <iomanip>
 #include <thread>
 #include <random>
+#include <numa.h>
 
 #include "rapid_transfer.h"
 
@@ -53,19 +54,34 @@ static void *allocateMemoryPool(size_t size, int socket_id) {
 
 static void freeMemoryPool(void *addr, size_t size) { numa_free(addr, size); }
 
-std::map<std::string, int> listDevices() {
+std::vector<std::pair<std::string, int>> listDevices() {
     int num_devices = 0;
-    std::vector<std::string> device_name_list;
+    std::vector<std::pair<std::string, int>> device_list;
     struct ibv_device **devices = ibv_get_device_list(&num_devices);
     if (!devices || num_devices <= 0) {
         PLOG(ERROR) << "ibv_get_device_list failed";
         return {};
     }
     for (int i = 0; i < num_devices; ++i) {
-        device_name_list.push_back(ibv_get_device_name(devices[i]));
+        std::string device_name = ibv_get_device_name(devices[i]);
+        char path[PATH_MAX + 32];
+        char resolved_path[PATH_MAX];
+        // Get the PCI bus id for the infiniband device. Note that
+        // "/sys/class/infiniband/mlx5_X/" is a symlink to
+        // "/sys/devices/pciXXXX:XX/XXXX:XX:XX.X/infiniband/mlx5_X/".
+        snprintf(path, sizeof(path), "/sys/class/infiniband/%s/../..",
+                 device_name.c_str());
+        if (realpath(path, resolved_path) == NULL) {
+            continue;
+        }
+        std::string pci_bus_id = basename(resolved_path);
+        int numa_node = -1;
+        snprintf(path, sizeof(path), "%s/numa_node", resolved_path);
+        std::ifstream(path) >> numa_node;
+        device_list.push_back(std::make_pair(device_name, numa_node));
     }
     ibv_free_device_list(devices);
-    return device_name_list;
+    return device_list;
 }
 
 static inline int64_t getCurrentTimeInNano() {
@@ -77,18 +93,48 @@ static inline int64_t getCurrentTimeInNano() {
     return (int64_t{ts.tv_sec} * kNanosPerSecond + int64_t{ts.tv_nsec});
 }
 
-static std::vector<std::string> device_name_list = listDevices();
+static auto device_list = listDevices();
+
+static inline int bindToSocket(int socket_id) {
+    if (numa_available() < 0) {
+        LOG(WARNING) << "The platform does not support NUMA";
+        return -1;
+    }
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    if (socket_id < 0 || socket_id >= numa_num_configured_nodes())
+        socket_id = 0;
+    struct bitmask *cpu_list = numa_allocate_cpumask();
+    numa_node_to_cpus(socket_id, cpu_list);
+    int nr_possible_cpus = numa_num_possible_cpus();
+    int nr_cpus = 0;
+    for (int cpu = 0; cpu < nr_possible_cpus; ++cpu) {
+        if (numa_bitmask_isbitset(cpu_list, cpu) &&
+            numa_bitmask_isbitset(numa_all_cpus_ptr, cpu)) {
+            CPU_SET(cpu, &cpu_set);
+            nr_cpus++;
+        }
+    }
+    numa_free_cpumask(cpu_list);
+    if (nr_cpus == 0) return 0;
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpu_set)) {
+        LOG(ERROR) << "bindToSocket: pthread_setaffinity_np failed";
+        return -1;
+    }
+    return 0;
+}
 
 int receiveThread(int thread_id) {
-    int group_id = thread_id % device_name_list.size();
+    int group_id = thread_id % device_list.size();
     uint16_t port = FLAGS_first_port + thread_id;
-    auto device = device_name_list[group_id];
+    auto device = device_list[group_id].first;
+    bindToSocket(device_list[group_id].second);
     auto engine = rapid::RapidTransfer::Create(
         FLAGS_protocol, device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
 
-    const size_t dram_buffer_size = 64 * 1024 * 1024;
-    void *addr = allocateMemoryPool(dram_buffer_size, 0);
+    const size_t dram_buffer_size = FLAGS_block_size * FLAGS_depth * 2;
+    void *addr = allocateMemoryPool(dram_buffer_size, device_list[group_id].second);
     if (!addr) {
         LOG(ERROR) << "Failed to allocate memory pool";
         return -1;
@@ -107,7 +153,7 @@ int receiveThread(int thread_id) {
         mutex.lock();
         for (size_t depth = 0; depth < FLAGS_depth; ++depth) {
             auto task_id =
-                engine->receive(peer_name, {{addr, FLAGS_block_size}});
+                engine->receive(peer_name, {{(char*)addr + depth * FLAGS_block_size, FLAGS_block_size}});
             task_id_map.emplace(std::make_pair(peer_name, task_id));
         }
         mutex.unlock();
@@ -124,6 +170,7 @@ int receiveThread(int thread_id) {
     while (true) {
         mutex.lock();
         engine->runStep();
+        int depth = 0;
         for (auto &entry : task_id_map) {
             auto status = engine->getStatus(entry.second, nullptr);
             if (status == rapid::FAILED) {
@@ -135,8 +182,9 @@ int receiveThread(int thread_id) {
                 // for (uint64_t i = 0; i < FLAGS_block_size; ++i)
                 //     assert(*((char *)addr + i) == char(base + i % 256));
                 entry.second =
-                    engine->receive(entry.first, {{addr, FLAGS_block_size}});
+                    engine->receive(entry.first, {{(char*)addr + depth * FLAGS_block_size, FLAGS_block_size}});
             }
+            depth++;
         }
         mutex.unlock();
     }
@@ -159,15 +207,16 @@ std::vector<std::string> extractTargetHostName() {
 }
 
 int sendThread(pthread_barrier_t *barrier, int thread_id) {
-    int group_id = thread_id % device_name_list.size();
-    auto device = device_name_list[group_id];
+    int group_id = thread_id % device_list.size();
+    auto device = device_list[group_id].first;
+    bindToSocket(device_list[group_id].second);
     auto engine = rapid::RapidTransfer::Create(
         FLAGS_protocol, device, FLAGS_rdma_port, FLAGS_gid_index);
     assert(engine);
     uint64_t transferred_bytes = 0;
 
-    const size_t dram_buffer_size = 64 * 1024 * 1024;
-    void *addr = allocateMemoryPool(dram_buffer_size, 0);
+    const size_t dram_buffer_size = FLAGS_block_size * FLAGS_depth * 2;
+    void *addr = allocateMemoryPool(dram_buffer_size, device_list[group_id].second);
     if (!addr) {
         LOG(ERROR) << "Failed to allocate memory pool";
         return -1;
@@ -188,7 +237,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
         TaskID task_id;
         for (auto port = FLAGS_first_port + group_id; 
                 port < FLAGS_first_port + FLAGS_threads; 
-                port += device_name_list.size()) {
+                port += device_list.size()) {
             auto hostname = target_hostname_list[0];
             auto target = hostname + ":" + std::to_string(port);
             while (true) {
@@ -229,7 +278,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
     std::uniform_int_distribution<int> dist;
     std::mt19937 rng;
 
-    size_t device_count = device_name_list.size(); 
+    size_t device_count = device_list.size(); 
     size_t class_count = (FLAGS_threads + device_count - 1) / device_count;
     auto selectPeerIndex = [&]() -> int {
         /*
@@ -246,7 +295,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
         auto hostname = target_hostname_list[dist(rng) % target_hostname_list.size()];
         auto target = hostname + ":" + std::to_string(port);
         while (true) {
-            task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
+            task_id_list[depth] = engine->send(target, {{(char*)addr + depth * chunk_size, chunk_size}});
             if (task_id_list[depth] < 0) {
                 usleep(1000);
             } else {
@@ -269,7 +318,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
                 auto hostname = target_hostname_list[dist(rng) % target_hostname_list.size()];
                 auto target = hostname + ":" + std::to_string(port);
                 while (true) {
-                    task_id_list[depth] = engine->send(target, {{addr, chunk_size}});
+                    task_id_list[depth] = engine->send(target, {{(char*)addr + depth * chunk_size, chunk_size}});
                     if (task_id_list[depth] < 0) {
                         usleep(1000);
                     } else {
