@@ -54,6 +54,7 @@ int SessionManager::startListener(const std::string &address,
         PLOG(ERROR) << "Illegal address format";
         return -1;
     }
+    on_accept_ = on_accept;
     server_ = new coro_rpc::coro_rpc_server(1, port);
     server_->register_handler<&SessionManager::exchangeMetadata>(this);
     coro_rpc::err_code err = server_->start();
