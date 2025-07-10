@@ -38,6 +38,15 @@ DEFINE_uint32(gid_index, 0, "GID Index");
 
 using namespace rapid;
 
+static inline int64_t getCurrentTimeInNano() {
+    const int64_t kNanosPerSecond = 1000 * 1000 * 1000;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts)) {
+        return -1;
+    }
+    return (int64_t{ts.tv_sec} * kNanosPerSecond + int64_t{ts.tv_nsec});
+}
+
 static void *allocateMemoryPool(size_t size, int socket_id) {
     return numa_alloc_onnode(size, socket_id);
 }
@@ -201,6 +210,15 @@ int receiver() {
     while (start_recv_count.load() < (int)FLAGS_num_recv_files)
         std::this_thread::yield();
     for (auto &receiver : receiver_list) receiver.join();
+
+    // Extra delay for resend ACK packets
+    uint64_t begin_ts = getCurrentTimeInNano();
+    while (true) {
+        engine->runStep();
+        uint64_t current_ts = getCurrentTimeInNano();
+        if (current_ts - begin_ts > 100*1000*1000ull) break;
+    }
+
     cleanup();
     return 0;
 }

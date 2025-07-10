@@ -61,6 +61,8 @@ struct RdmaUnreliableMcastProtocol : public Protocol {
 
     virtual int unregisterLocalMemory(void *addr);
 
+    virtual int runStep();
+
     int doEventLoop(int64_t timeout = -1);
 
    private:

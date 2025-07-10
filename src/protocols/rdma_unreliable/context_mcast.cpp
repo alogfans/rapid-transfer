@@ -477,9 +477,9 @@ int ContextMcast::processReceivedPacket(uint64_t current_ts, ibv_wc &wc,
             session = controller_.findSession(multicast_addr, handle.session);
         }
         if (session >= 0) {
-            assert(active_session_map_.count(session));
             switch (handle.cmd) {
                 case PKT_CMD_DATA: {
+                    assert(active_session_map_.count(session));
                     uint64_t head, tail;
                     auto &receive_queue = *active_session_map_[session].receive_queue;
                     receive_queue.getIndexRange(head, tail);
@@ -492,6 +492,7 @@ int ContextMcast::processReceivedPacket(uint64_t current_ts, ibv_wc &wc,
                 case PKT_CMD_ACK: {
                     int index = 0;
                     session = controller_.redirectMulticast(session, index);
+                    assert(active_session_map_.count(session));
                     auto &mcast_send_queue = *active_session_map_[session].mcast_send_queue;
                     mcast_send_queue.markCompleted(index, handle.sn);
                     auto rtt = (current_ts - handle.ts) & ((1ull << 48) - 1);
