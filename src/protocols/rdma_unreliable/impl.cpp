@@ -76,7 +76,7 @@ TaskID RdmaUnreliableProtocol::receive(const std::string &peer_name,
 Status RdmaUnreliableProtocol::getStatus(TaskID task_id,
                                          size_t *transferred_bytes) {
     Status status = context_.getStatus(task_id, transferred_bytes);
-    if (status == Status::PENDING && !spawn_worker_) doEventLoop(0);
+    if (status == Status::PENDING && !spawn_worker_) runStep();
     return status;
 }
 

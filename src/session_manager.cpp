@@ -65,7 +65,6 @@ int SessionManager::startListener(const std::string &address,
 int SessionManager::shutdownListener() {
     if (server_) {
         server_->stop();
-        thread_.join();
         delete server_;
         server_ = nullptr;
     }

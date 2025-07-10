@@ -62,7 +62,6 @@ class SessionManager {
     RWSpinlock sessions_lock_;
     std::unordered_set<std::string> sessions_;
 
-    std::thread thread_;
     std::atomic<int> uid_ {0};
 };
 }  // namespace rapid
