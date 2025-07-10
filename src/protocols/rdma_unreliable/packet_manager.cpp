@@ -3,6 +3,8 @@
 #include "packet_manager.h"
 
 #include <glog/logging.h>
+#include <numa.h>
+#include <fstream>
 
 namespace rapid {
 
@@ -188,12 +190,28 @@ PacketBufferPool::PacketBufferPool(size_t mtu_size, size_t max_packets)
 
 PacketBufferPool::~PacketBufferPool() { deconstruct(); }
 
-int PacketBufferPool::construct() {
-    int ret = posix_memalign(&arena_, 4096, mtu_size_ * max_packets_);
-    if (ret) {
-        PLOG(ERROR) << "posix_memalign failed";
-        return ret;
+int PacketBufferPool::construct(const std::string &device_name) {
+    int socket_id = 0;
+    if (!device_name.empty()) {
+        char path[PATH_MAX + 32];
+        char resolved_path[PATH_MAX];
+        // Get the PCI bus id for the infiniband device. Note that
+        // "/sys/class/infiniband/mlx5_X/" is a symlink to
+        // "/sys/devices/pciXXXX:XX/XXXX:XX:XX.X/infiniband/mlx5_X/".
+        snprintf(path, sizeof(path), "/sys/class/infiniband/%s/../..",
+                 device_name.c_str());
+        if (realpath(path, resolved_path)) {
+            std::string pci_bus_id = basename(resolved_path);
+            snprintf(path, sizeof(path), "%s/numa_node", resolved_path);
+            std::ifstream(path) >> socket_id;
+        }
     }
+    arena_ = numa_alloc_onnode(mtu_size_ * max_packets_, socket_id);
+    // int ret = posix_memalign(&arena_, 4096, mtu_size_ * max_packets_);
+    // if (ret) {
+    //     PLOG(ERROR) << "posix_memalign failed";
+    //     return ret;
+    // }
     for (size_t index = 0; index < max_packets_; ++index) {
         uint8_t *ptr = (uint8_t *)arena_ + mtu_size_ * index;
         *(uintptr_t *)ptr = (uintptr_t)global_free_buffer_;
@@ -204,17 +222,16 @@ int PacketBufferPool::construct() {
 
 int PacketBufferPool::deconstruct() {
     if (arena_) {
-        free(arena_);
+        numa_free(arena_, mtu_size_ * max_packets_);
         arena_ = nullptr;
     }
     return 0;
 }
 
 int PacketBufferPool::allocatePacket(PacketHandle &handle, bool with_grh) {
-    RWSpinlock::WriteGuard guard(arena_lock_);
+    // RWSpinlock::WriteGuard guard(arena_lock_);
     void *packet_buf = global_free_buffer_;
     if (!packet_buf) {
-        LOG(ERROR) << "out of memory";
         return -1;
     }
     uintptr_t next = *(uintptr_t *)packet_buf;
@@ -223,7 +240,7 @@ int PacketBufferPool::allocatePacket(PacketHandle &handle, bool with_grh) {
 }
 
 int PacketBufferPool::freePacket(PacketHandle &handle) {
-    RWSpinlock::WriteGuard guard(arena_lock_);
+    // RWSpinlock::WriteGuard guard(arena_lock_);
     auto packet_buf = handle.packet_buf;
     if (!packet_buf) {
         LOG(ERROR) << "invalid packet handle";
@@ -282,9 +299,9 @@ int SendQueue::fillPrimaryQueue() {
     // including wrap-ups
     while (secondary_queue_.hasRemainingFragment() &&
            head_ - tail_ <= wnd_size_) {
-        auto slice = secondary_queue_.popFragment();
         auto &handle = handle_[head_ % queue_capacity_];
-        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return -1;
+        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return 0;
+        auto slice = secondary_queue_.popFragment();
         handle.session = session_;
         handle.cmd = PKT_CMD_DATA;
         handle.wnd = wnd_size_;
@@ -375,9 +392,9 @@ int McastSendQueue::fillPrimaryQueue() {
     // including wrap-ups
     while (secondary_queue_.hasRemainingFragment() &&
            head_ - getMinTailIndex() <= wnd_size_) {
-        auto slice = secondary_queue_.popFragment();
         auto &handle = handle_[head_ % queue_capacity_];
-        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return -1;
+        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return 0;
+        auto slice = secondary_queue_.popFragment();
         handle.session = session_;
         handle.cmd = PKT_CMD_DATA;
         handle.wnd = wnd_size_;
@@ -499,7 +516,7 @@ PacketManager::PacketManager(size_t mtu_size, size_t max_packets,
 
 PacketManager::~PacketManager() { deconstruct(); }
 
-int PacketManager::construct() { return pool_.construct(); }
+int PacketManager::construct(const std::string &device_name) { return pool_.construct(device_name); }
 
 int PacketManager::deconstruct() {
     for (auto &entry : send_queue_) delete entry.second;

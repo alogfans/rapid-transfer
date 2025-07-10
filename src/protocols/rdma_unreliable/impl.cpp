@@ -76,7 +76,7 @@ TaskID RdmaUnreliableProtocol::receive(const std::string &peer_name,
 Status RdmaUnreliableProtocol::getStatus(TaskID task_id,
                                          size_t *transferred_bytes) {
     Status status = context_.getStatus(task_id, transferred_bytes);
-    if (!spawn_worker_) doEventLoop(0);
+    if (status == Status::PENDING && !spawn_worker_) doEventLoop(0);
     return status;
 }
 
@@ -103,14 +103,5 @@ int RdmaUnreliableProtocol::setMulticastReplicas(
     const std::vector<std::string> &peer_name_list) {
     LOG(ERROR) << "not implemented";
     return -1;
-}
-
-int RdmaUnreliableProtocol::doEventLoop(int64_t timeout) {
-    thread_local uint64_t last_ts = 4000;
-    uint64_t current_ts  = getCurrentTimeInNano();
-    const static uint64_t kThreshold = 0; // 1us
-    if (current_ts - last_ts < kThreshold) return 0;  // drop requests
-    last_ts = current_ts;
-    return context_.runStep();
 }
 }  // namespace rapid

@@ -46,7 +46,7 @@ struct RdmaReliableProtocol : public Protocol {
 
     virtual int unregisterLocalMemory(void *addr);
 
-    int doEventLoop(int64_t timeout = -1);
+    virtual int runStep();
 
    public:
     struct Task {

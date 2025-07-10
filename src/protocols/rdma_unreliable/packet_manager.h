@@ -92,7 +92,7 @@ class PacketBufferPool {
     PacketBufferPool(const PacketBufferPool &) = delete;
     PacketBufferPool &operator=(const PacketBufferPool &) = delete;
 
-    int construct();
+    int construct(const std::string &device_name = "");
 
     int deconstruct();
 
@@ -285,7 +285,7 @@ class ReceiveQueue {
 
 class PacketManager {
    public:
-    const static size_t kWndSize = 256;
+    const static size_t kWndSize = 64;
 
     PacketManager(size_t mtu_size, size_t max_packets, size_t queue_capacity,
                   size_t wnd_size = kWndSize);
@@ -295,7 +295,7 @@ class PacketManager {
     PacketManager(const PacketManager &) = delete;
     PacketManager &operator=(const PacketManager &) = delete;
 
-    int construct();
+    int construct(const std::string &device_name = "");
 
     int deconstruct();
 

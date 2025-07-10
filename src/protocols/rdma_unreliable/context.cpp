@@ -23,7 +23,7 @@ int Context::construct(const std::string &device_name, uint8_t rdma_port,
     int ret = 0;
     ret = controller_.construct(device_name, rdma_port, gid_index);
     if (ret < 0) return ret;
-    ret = packet_manager_.construct();
+    ret = packet_manager_.construct(device_name);
     if (ret < 0) return ret;
 
     auto &pool = packet_manager_.getPool();
