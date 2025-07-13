@@ -41,7 +41,8 @@ struct RequestCache {
             allocated_++;
             return new Request();
         }
-        auto request = lazy_delete_requests_[tail_ % kLazyDeleteRequestCapacity];
+        auto request =
+            lazy_delete_requests_[tail_ % kLazyDeleteRequestCapacity];
         tail_++;
         new (request) Request();
         return request;

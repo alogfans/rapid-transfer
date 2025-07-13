@@ -33,8 +33,8 @@ std::shared_ptr<RapidTransfer> RapidTransfer::Create(
         engine->protocol_ =
             new RdmaUnreliableProtocol(mtu_size, max_packets, queue_capacity);
     } else if (protocol == "rdma_unreliable_mcast") {
-        engine->protocol_ =
-            new RdmaUnreliableMcastProtocol(mtu_size, max_packets, queue_capacity);
+        engine->protocol_ = new RdmaUnreliableMcastProtocol(
+            mtu_size, max_packets, queue_capacity);
     } else {
         LOG(ERROR) << "Unrecognized protocol";
         return nullptr;
@@ -107,9 +107,7 @@ int RapidTransfer::unregisterLocalMemory(void *addr) {
     return protocol_->unregisterLocalMemory(addr);
 }
 
-int RapidTransfer::runStep() {
-    return protocol_->runStep();
-}
+int RapidTransfer::runStep() { return protocol_->runStep(); }
 
 int RapidTransfer::startListener(const std::string &listen_address,
                                  const OnConnectionStateChange &callback) {

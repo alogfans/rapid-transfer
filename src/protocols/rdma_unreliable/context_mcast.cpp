@@ -199,7 +199,7 @@ Status ContextMcast::getStatus(TaskID task_id, size_t *transferred_bytes) {
     if (!task_map_.count(task_id)) return Status::UNKNOWN;
     auto &task = task_map_[task_id];
     if (task.is_send) {
-        auto &queue = *(McastSendQueue *) task.queue;
+        auto &queue = *(McastSendQueue *)task.queue;
         auto ack_sn = queue.getAckSN();
         auto next_sn = queue.getNextSN();
         if (ack_sn <= next_sn) {
@@ -208,7 +208,7 @@ Status ContextMcast::getStatus(TaskID task_id, size_t *transferred_bytes) {
             if (task.last_sn >= next_sn) return Status::SUCCESS;
         }
     } else {
-        auto &queue = *(ReceiveQueue *) task.queue;
+        auto &queue = *(ReceiveQueue *)task.queue;
         auto ack_sn = queue.getAckSN();
         auto next_sn = queue.getNextSN();
         if (ack_sn <= next_sn) {
@@ -380,18 +380,18 @@ int ContextMcast::sendDataPackets(uint64_t current_ts) {
             Request *request = nullptr;
             // LOG(INFO) << "send data ... sn = " << handle.sn;
             if (slices.size() == 1)
-                request = new Request{
-                    .addr = {slices[0].addr},
-                    .length = {slices[0].length},
-                    .lkey = {context->key(slices[0].addr).first},
-                    .imm_data = imm_data};
+                request =
+                    new Request{.addr = {slices[0].addr},
+                                .length = {slices[0].length},
+                                .lkey = {context->key(slices[0].addr).first},
+                                .imm_data = imm_data};
             else if (slices.size() == 2)
-                request = new Request{
-                    .addr = {slices[0].addr, slices[1].addr},
-                    .length = {slices[0].length, slices[1].length},
-                    .lkey = {context->key(slices[0].addr).first,
-                                context->key(slices[1].addr).first},
-                    .imm_data = imm_data};
+                request =
+                    new Request{.addr = {slices[0].addr, slices[1].addr},
+                                .length = {slices[0].length, slices[1].length},
+                                .lkey = {context->key(slices[0].addr).first,
+                                         context->key(slices[1].addr).first},
+                                .imm_data = imm_data};
             else
                 return -1;
             request_list.push_back(request);
@@ -400,7 +400,7 @@ int ContextMcast::sendDataPackets(uint64_t current_ts) {
                 context->postSendRequest(request_list);
                 session.second.send_packets += request_list_len;
                 stats_.send_packets.fetch_add(request_list_len,
-                                                std::memory_order_relaxed);
+                                              std::memory_order_relaxed);
                 request_list.clear();
             }
             return 0;
@@ -481,7 +481,8 @@ int ContextMcast::processReceivedPacket(uint64_t current_ts, ibv_wc &wc,
                 case PKT_CMD_DATA: {
                     assert(active_session_map_.count(session));
                     uint64_t head, tail;
-                    auto &receive_queue = *active_session_map_[session].receive_queue;
+                    auto &receive_queue =
+                        *active_session_map_[session].receive_queue;
                     receive_queue.getIndexRange(head, tail);
                     if (head == tail) break;
                     receive_queue.markCompleted(handle);
@@ -493,7 +494,8 @@ int ContextMcast::processReceivedPacket(uint64_t current_ts, ibv_wc &wc,
                     int index = 0;
                     session = controller_.redirectMulticast(session, index);
                     assert(active_session_map_.count(session));
-                    auto &mcast_send_queue = *active_session_map_[session].mcast_send_queue;
+                    auto &mcast_send_queue =
+                        *active_session_map_[session].mcast_send_queue;
                     mcast_send_queue.markCompleted(index, handle.sn);
                     auto rtt = (current_ts - handle.ts) & ((1ull << 48) - 1);
                     updateRTO(rtt);

@@ -3,11 +3,10 @@
 
 #include "session_manager.h"
 
+#include <arpa/inet.h>
 #include <async_simple/coro/FutureAwaiter.h>
 #include <async_simple/coro/Lazy.h>
 #include <async_simple/coro/SyncAwait.h>
-
-#include <arpa/inet.h>
 #include <fcntl.h>
 #include <glog/logging.h>
 #include <json/json.h>
@@ -39,7 +38,9 @@ SessionManager::~SessionManager() {
 std::string SessionManager::exchangeMetadata(std::string request_json) {
     Attributes request, response;
     if (readAttributes(request_json, request)) return "<error>";
-    if (on_accept_("server/" + std::to_string(uid_.fetch_add(1)), request, response)) return "<error>";
+    if (on_accept_("server/" + std::to_string(uid_.fetch_add(1)), request,
+                   response))
+        return "<error>";
     std::string response_json;
     if (writeAttributes(response_json, response)) return "<error>";
     return response_json;
@@ -82,7 +83,8 @@ int SessionManager::connect(const std::string &address,
 
     std::string request_json;
     if (writeAttributes(request_json, request)) return -1;
-    auto request_result = client.send_request<&SessionManager::exchangeMetadata>(request_json);
+    auto request_result =
+        client.send_request<&SessionManager::exchangeMetadata>(request_json);
     std::optional<std::string> result = async_simple::coro::syncAwait(
         [&]() -> async_simple::coro::Lazy<std::optional<std::string>> {
             auto result = co_await co_await request_result;
@@ -125,7 +127,8 @@ bool SessionManager::hasConnection(const std::string &address) {
     return sessions_.count(address);
 }
 
-int SessionManager::readAttributes(const std::string &json_string, Attributes &attr) {
+int SessionManager::readAttributes(const std::string &json_string,
+                                   Attributes &attr) {
     Json::CharReaderBuilder reader;
     Json::Value json_object;
     std::string errs;
@@ -140,7 +143,8 @@ int SessionManager::readAttributes(const std::string &json_string, Attributes &a
     return 0;
 }
 
-int SessionManager::writeAttributes(std::string &json_string, const Attributes &attr) {
+int SessionManager::writeAttributes(std::string &json_string,
+                                    const Attributes &attr) {
     Json::Value json_object;
     for (const auto &pair : attr) json_object[pair.first] = pair.second;
     Json::StreamWriterBuilder writer;

@@ -4,6 +4,7 @@
 
 #include <glog/logging.h>
 #include <numa.h>
+
 #include <fstream>
 
 namespace rapid {
@@ -99,10 +100,8 @@ int PacketHandle::serialize(Buffer *slices, uint32_t &imm_data) {
         slices[1] = Buffer{.addr = nullptr, .length = 0};
     } else {
         // 2b. has attach data, w/ zero copy
-        slices[0] = 
-            Buffer{.addr = handle.packet_buf, .length = sizeof(PktHdr)};
-        slices[1] = 
-            Buffer{.addr = handle.data_buf, .length = handle.data_len};
+        slices[0] = Buffer{.addr = handle.packet_buf, .length = sizeof(PktHdr)};
+        slices[1] = Buffer{.addr = handle.data_buf, .length = handle.data_len};
     }
     return 0;
 }
@@ -516,7 +515,9 @@ PacketManager::PacketManager(size_t mtu_size, size_t max_packets,
 
 PacketManager::~PacketManager() { deconstruct(); }
 
-int PacketManager::construct(const std::string &device_name) { return pool_.construct(device_name); }
+int PacketManager::construct(const std::string &device_name) {
+    return pool_.construct(device_name);
+}
 
 int PacketManager::deconstruct() {
     for (auto &entry : send_queue_) delete entry.second;

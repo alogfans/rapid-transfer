@@ -107,8 +107,8 @@ int RdmaUnreliableMcastProtocol::setMulticastReplicas(
 
 int RdmaUnreliableMcastProtocol::doEventLoop(int64_t timeout) {
     thread_local uint64_t last_ts = 4000;
-    uint64_t current_ts  = getCurrentTimeInNano();
-    const static uint64_t kThreshold = 0; // 1us
+    uint64_t current_ts = getCurrentTimeInNano();
+    const static uint64_t kThreshold = 0;             // 1us
     if (current_ts - last_ts < kThreshold) return 0;  // drop requests
     last_ts = current_ts;
     return context_.runStep();

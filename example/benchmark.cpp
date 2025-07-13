@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <gflags/gflags.h>
 #include <glog/logging.h>
+#include <infiniband/verbs.h>
 #include <numa.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -23,15 +24,11 @@
 #include <csignal>
 #include <future>
 #include <iomanip>
-#include <thread>
 #include <random>
-#include <numa.h>
+#include <thread>
 
 #include "rapid_transfer.h"
-
 #include "ylt/easylog.hpp"
-
-#include <infiniband/verbs.h>
 
 DEFINE_string(role, "sender", "Execution role: sender, receiver");
 DEFINE_string(protocol, "rdma_unreliable",
@@ -134,7 +131,8 @@ int receiveThread(int thread_id) {
     assert(engine);
 
     const size_t dram_buffer_size = FLAGS_block_size * FLAGS_depth * 2;
-    void *addr = allocateMemoryPool(dram_buffer_size, device_list[group_id].second);
+    void *addr =
+        allocateMemoryPool(dram_buffer_size, device_list[group_id].second);
     if (!addr) {
         LOG(ERROR) << "Failed to allocate memory pool";
         return -1;
@@ -156,9 +154,11 @@ int receiveThread(int thread_id) {
     auto on_new_connection = [&](const std::string &peer_name, bool is_join) {
         mutex.lock();
         for (int depth = 0; depth < (int)FLAGS_depth; ++depth) {
-            auto task_id =
-                engine->receive(peer_name, {{(char*)addr + depth * FLAGS_block_size, FLAGS_block_size}});
-            task_id_map.emplace(std::make_pair(peer_name, TaskEntry{task_id, depth}));
+            auto task_id = engine->receive(
+                peer_name,
+                {{(char *)addr + depth * FLAGS_block_size, FLAGS_block_size}});
+            task_id_map.emplace(
+                std::make_pair(peer_name, TaskEntry{task_id, depth}));
         }
         mutex.unlock();
     };
@@ -184,8 +184,10 @@ int receiveThread(int thread_id) {
                 // auto base = *((char *)addr);
                 // for (uint64_t i = 0; i < FLAGS_block_size; ++i)
                 //     assert(*((char *)addr + i) == char(base + i % 256));
-                entry.second.id =
-                    engine->receive(entry.first, {{(char*)addr + entry.second.depth * FLAGS_block_size, FLAGS_block_size}});
+                entry.second.id = engine->receive(
+                    entry.first,
+                    {{(char *)addr + entry.second.depth * FLAGS_block_size,
+                      FLAGS_block_size}});
             }
         }
         mutex.unlock();
@@ -218,7 +220,8 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
     uint64_t transferred_bytes = 0;
 
     const size_t dram_buffer_size = FLAGS_block_size * FLAGS_depth * 2;
-    void *addr = allocateMemoryPool(dram_buffer_size, device_list[group_id].second);
+    void *addr =
+        allocateMemoryPool(dram_buffer_size, device_list[group_id].second);
     if (!addr) {
         LOG(ERROR) << "Failed to allocate memory pool";
         return -1;
@@ -239,9 +242,9 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         TaskID task_id;
-        for (auto port = FLAGS_first_port + group_id; 
-                port < FLAGS_first_port + FLAGS_threads; 
-                port += device_list.size()) {
+        for (auto port = FLAGS_first_port + group_id;
+             port < FLAGS_first_port + FLAGS_threads;
+             port += device_list.size()) {
             auto hostname = target_hostname_list[0];
             auto target = hostname + ":" + std::to_string(port);
             while (true) {
@@ -258,7 +261,8 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
                 engine->runStep();
                 auto now = getCurrentTimeInNano();
                 if (now - start > 10000000000) {
-                    LOG(INFO) << thread_id << " to " << port - FLAGS_first_port << " possibily failed";
+                    LOG(INFO) << thread_id << " to " << port - FLAGS_first_port
+                              << " possibily failed";
                     exit(0);
                 }
                 auto status = engine->getStatus(task_id, nullptr);
@@ -273,8 +277,9 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
             }
         }
     }
-    
-    LOG(INFO) << g_ready_threads.fetch_add(1) + 1 << "/" << FLAGS_threads << " thread ready";
+
+    LOG(INFO) << g_ready_threads.fetch_add(1) + 1 << "/" << FLAGS_threads
+              << " thread ready";
     pthread_barrier_wait(barrier);
 
     // Initial
@@ -282,7 +287,7 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
     std::uniform_int_distribution<int> dist;
     std::mt19937 rng;
 
-    size_t device_count = device_list.size(); 
+    size_t device_count = device_list.size();
     size_t class_count = (FLAGS_threads + device_count - 1) / device_count;
     auto selectPeerIndex = [&]() -> int {
         auto base_index = device_count * (dist(rng) % class_count);
@@ -291,10 +296,12 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
 
     for (size_t depth = 0; depth < FLAGS_depth; depth++) {
         uint16_t port = FLAGS_first_port + selectPeerIndex();
-        auto hostname = target_hostname_list[dist(rng) % target_hostname_list.size()];
+        auto hostname =
+            target_hostname_list[dist(rng) % target_hostname_list.size()];
         auto target = hostname + ":" + std::to_string(port);
         while (true) {
-            task_id_list[depth] = engine->send(target, {{(char*)addr + depth * chunk_size, chunk_size}});
+            task_id_list[depth] = engine->send(
+                target, {{(char *)addr + depth * chunk_size, chunk_size}});
             if (task_id_list[depth] < 0) {
                 usleep(1000);
             } else {
@@ -314,10 +321,14 @@ int sendThread(pthread_barrier_t *barrier, int thread_id) {
             if (status == rapid::SUCCESS) {
                 engine->freeTask(task_id_list[depth]);
                 uint16_t port = FLAGS_first_port + selectPeerIndex();
-                auto hostname = target_hostname_list[dist(rng) % target_hostname_list.size()];
+                auto hostname =
+                    target_hostname_list[dist(rng) %
+                                         target_hostname_list.size()];
                 auto target = hostname + ":" + std::to_string(port);
                 while (true) {
-                    task_id_list[depth] = engine->send(target, {{(char*)addr + depth * chunk_size, chunk_size}});
+                    task_id_list[depth] = engine->send(
+                        target,
+                        {{(char *)addr + depth * chunk_size, chunk_size}});
                     if (task_id_list[depth] < 0) {
                         usleep(1000);
                     } else {
@@ -365,7 +376,7 @@ int sender() {
     double duration = (tv_end.tv_sec - tv_begin.tv_sec) +
                       (tv_end.tv_usec - tv_begin.tv_usec) / 1000000.0;
     LOG(INFO) << g_transferred_bytes.load() / duration / 1024.0 / 1024.0 /
-                     1024.0;
+                     1024.0 << " GB/s";
     return 0;
 }
 

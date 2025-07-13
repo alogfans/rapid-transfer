@@ -4,6 +4,8 @@
 
 #include <cassert>
 
+#include "ylt/easylog.hpp"
+
 namespace rapid {
 static std::string ToString(const std::vector<uint32_t> &list) {
     std::ostringstream oss;

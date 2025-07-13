@@ -60,7 +60,8 @@ int RdmaRCEndPoint::deconstruct() {
     for (size_t i = 0; i < qp_list_.size(); ++i) {
         // if (send_wr_depth_list_[i] || recv_wr_depth_list_[i])
         //     PLOG(WARNING)
-        //         << "Outstanding work requests found, CQ will not be generated";
+        //         << "Outstanding work requests found, CQ will not be
+        //         generated";
 
         if (ibv_destroy_qp(qp_list_[i])) {
             PLOG(ERROR) << "Failed to destroy QP";

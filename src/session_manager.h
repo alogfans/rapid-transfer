@@ -9,12 +9,11 @@
 #include <atomic>
 #include <thread>
 #include <unordered_set>
+#include <ylt/coro_rpc/coro_rpc_client.hpp>
+#include <ylt/coro_rpc/coro_rpc_server.hpp>
 
 #include "concurrency.h"
 #include "rapid_transfer.h"
-
-#include <ylt/coro_rpc/coro_rpc_server.hpp>
-#include <ylt/coro_rpc/coro_rpc_client.hpp>
 
 namespace rapid {
 using Attributes = std::unordered_map<std::string, std::string>;
@@ -62,7 +61,7 @@ class SessionManager {
     RWSpinlock sessions_lock_;
     std::unordered_set<std::string> sessions_;
 
-    std::atomic<int> uid_ {0};
+    std::atomic<int> uid_{0};
 };
 }  // namespace rapid
 

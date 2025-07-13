@@ -166,7 +166,7 @@ int Controller::findSession(ibv_gid &gid, uint32_t qp_num, uint8_t session) {
     if (device_name.find("mlx5_bond") != device_name.npos) {
         int ans_cnt = 0;
         int index = -1;
-        for (auto &entry : node_id_map_) 
+        for (auto &entry : node_id_map_)
             if (entry.first.qp_num == qp_num) {
                 index = entry.second * 256 + session;
                 ans_cnt++;

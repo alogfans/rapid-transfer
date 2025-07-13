@@ -346,6 +346,7 @@ int sender() {
 
 int main(int argc, char **argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, false);
+    easylog::set_min_severity(easylog::Severity::WARN);
 
     if (FLAGS_role == "sender")
         return sender();
