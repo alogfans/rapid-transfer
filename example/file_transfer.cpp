@@ -18,6 +18,7 @@
 #include <csignal>
 #include <future>
 #include <iomanip>
+#include <iostream>
 #include <thread>
 
 #include "rapid_transfer.h"
@@ -35,6 +36,9 @@ DEFINE_string(listen, ":12348", "TCP listen address");
 DEFINE_uint32(num_recv_files, 1, "Number of receiving files");
 DEFINE_uint32(rdma_port, 1, "RDMA port");
 DEFINE_uint32(gid_index, 0, "GID Index");
+DEFINE_bool(use_write_read, false, "Use write/read instead of send/receive");
+DEFINE_string(remote_addr, "", "Remote buffer address (hex format, e.g., 0x7f1234000000)");
+DEFINE_uint32(remote_rkey, 0, "Remote rkey for write/read operations");
 
 using namespace rapid;
 
@@ -141,6 +145,15 @@ int receiver() {
         freeMemoryPool(addr, dram_buffer_size);
     };
 
+    // Print buffer addresses for write/read mode
+    if (FLAGS_use_write_read) {
+        std::cout << "=== Write/Read Mode Info ===" << std::endl;
+        std::cout << "Receiver buffer address: 0x" << std::hex << (uintptr_t)addr << std::dec << std::endl;
+        std::cout << "Note: Sender needs to use --remote_addr=0x" << std::hex << (uintptr_t)addr << std::dec << std::endl;
+        std::cout << "=========================" << std::endl;
+        std::cout.flush();
+    }
+
     auto wait_for_completion = [&](TaskID task_id) {
         while (true) {
             auto status = engine->getStatus(task_id, nullptr);
@@ -169,36 +182,82 @@ int receiver() {
         const auto transferred_size = dram_buffer_size / FLAGS_num_recv_files;
         auto start_addr = (char *)addr + transferred_size * receiver_index;
 
-        TaskID task_id =
-            engine->receive(source, {{start_addr, sizeof(uint64_t)}});
-        if (wait_for_completion(task_id)) {
-            return -1;
-        }
+        if (FLAGS_use_write_read) {
+            // In write/read mode, the RPC handler will automatically call receive
+            // We just need to wait for data to arrive and poll for completion
+            LOG(INFO) << "Waiting for write/read data from " << source << " to buffer at 0x"
+                      << std::hex << (uintptr_t)start_addr << std::dec;
 
-        uint64_t file_size = *(uint64_t *)start_addr;
-        assert(file_size > 0 && file_size < (32ull << 30));
-        for (size_t offset = 0; offset < file_size;
-             offset += transferred_size) {
-            size_t chunk_size = std::min(transferred_size, file_size - offset);
-            task_id = engine->receive(source, {{start_addr, chunk_size}});
+            // Wait a bit for sender to initiate
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+            // Poll for completion by checking if data has arrived
+            // For now, we'll use a simple timeout mechanism
+            auto start_time = std::chrono::steady_clock::now();
+            const auto timeout = std::chrono::seconds(30);
+
+            // Check for file size (first 8 bytes)
+            while (std::chrono::steady_clock::now() - start_time < timeout) {
+                uint64_t file_size = *(uint64_t *)start_addr;
+                if (file_size != 0 && file_size < (32ull << 30)) {
+                    LOG(INFO) << "Received file size: " << file_size << " bytes";
+
+                    // Wait for all data to arrive
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                    // Write to file
+                    if ((ssize_t)file_size != writeFully(fd, start_addr, file_size)) {
+                        return -1;
+                    }
+                    close(fd);
+                    LOG(INFO) << "File saved to " << path;
+                    return 0;
+                }
+                engine->runStep();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            LOG(ERROR) << "Timeout waiting for data from sender";
+            close(fd);
+            return -1;
+        } else {
+            // Original send/receive mode
+            TaskID task_id =
+                engine->receive(source, {{start_addr, sizeof(uint64_t)}});
             if (wait_for_completion(task_id)) {
                 return -1;
             }
-            if ((ssize_t)chunk_size != writeFully(fd, start_addr, chunk_size)) {
-                return -1;
-            }
-        }
 
-        close(fd);
-        return 0;
+            uint64_t file_size = *(uint64_t *)start_addr;
+            assert(file_size > 0 && file_size < (32ull << 30));
+            for (size_t offset = 0; offset < file_size;
+                 offset += transferred_size) {
+                size_t chunk_size = std::min(transferred_size, file_size - offset);
+                task_id = engine->receive(source, {{start_addr, chunk_size}});
+                if (wait_for_completion(task_id)) {
+                    return -1;
+                }
+                if ((ssize_t)chunk_size != writeFully(fd, start_addr, chunk_size)) {
+                    return -1;
+                }
+            }
+
+            close(fd);
+            return 0;
+        }
     };
 
     std::vector<std::thread> receiver_list;
     auto on_new_connection = [&](const std::string &peer_name, bool is_join) {
         if (!is_join) return;
         LOG(INFO) << "Arriving connection: " << peer_name;
-        receiver_list.emplace_back(std::bind(receiver, peer_name));
+        if (!FLAGS_use_write_read) {
+            receiver_list.emplace_back(std::bind(receiver, peer_name));
+        }
     };
+
+    std::cout << "About to start listener..." << std::endl;
+    std::cout.flush();
 
     ret = engine->startListener(FLAGS_listen, on_new_connection);
     if (ret) {
@@ -207,9 +266,21 @@ int receiver() {
         freeMemoryPool(addr, dram_buffer_size);
         return -1;
     }
-    while (start_recv_count.load() < (int)FLAGS_num_recv_files)
-        std::this_thread::yield();
-    for (auto &receiver : receiver_list) receiver.join();
+
+    // In write/read mode, just wait indefinitely for RPC requests
+    // In normal mode, wait for all receivers to finish
+    if (FLAGS_use_write_read) {
+        std::cout << "Write/Read mode: waiting for incoming data..." << std::endl;
+        std::cout.flush();
+        while (true) {
+            engine->runStep();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    } else {
+        while (start_recv_count.load() < (int)FLAGS_num_recv_files)
+            std::this_thread::yield();
+        for (auto &receiver : receiver_list) receiver.join();
+    }
 
     // Extra delay for resend ACK packets
     uint64_t begin_ts = getCurrentTimeInNano();
@@ -307,7 +378,21 @@ int sender() {
 
     *(uint64_t *)addr = file_size;
     for (auto target : target_list) {
-        TaskID task_id = engine->send(target, {{addr, sizeof(uint64_t)}});
+        TaskID task_id;
+        if (FLAGS_use_write_read) {
+            // Parse remote address from command line
+            if (FLAGS_remote_addr.empty()) {
+                LOG(ERROR) << "Remote address must be specified for write/read mode";
+                cleanup();
+                return -1;
+            }
+            void *remote_addr = reinterpret_cast<void*>(std::stoull(FLAGS_remote_addr, nullptr, 16));
+            std::vector<RemoteBuffer> remote_buffers = {{remote_addr, sizeof(uint64_t), FLAGS_remote_rkey}};
+            std::vector<Buffer> local_buffers = {{addr, sizeof(uint64_t)}};
+            task_id = engine->write(target, local_buffers, remote_buffers);
+        } else {
+            task_id = engine->send(target, {{addr, sizeof(uint64_t)}});
+        }
         task_id_list.push_back(task_id);
     }
 
@@ -330,7 +415,15 @@ int sender() {
 
         task_id_list.clear();
         for (auto target : target_list) {
-            TaskID task_id = engine->send(target, {{addr, chunk_size}});
+            TaskID task_id;
+            if (FLAGS_use_write_read) {
+                void *remote_addr = reinterpret_cast<void*>(std::stoull(FLAGS_remote_addr, nullptr, 16));
+                std::vector<RemoteBuffer> remote_buffers = {{remote_addr, chunk_size, FLAGS_remote_rkey}};
+                std::vector<Buffer> local_buffers = {{addr, chunk_size}};
+                task_id = engine->write(target, local_buffers, remote_buffers);
+            } else {
+                task_id = engine->send(target, {{addr, chunk_size}});
+            }
             task_id_list.push_back(task_id);
         }
         for (auto task_id : task_id_list) {
@@ -346,7 +439,7 @@ int sender() {
 
 int main(int argc, char **argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, false);
-    easylog::set_min_severity(easylog::Severity::WARN);
+    FLAGS_minloglevel = google::GLOG_WARNING;
 
     if (FLAGS_role == "sender")
         return sender();

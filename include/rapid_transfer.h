@@ -21,6 +21,13 @@ struct Buffer {
     size_t length;
 };
 
+// Remote buffer descriptor for RDMA Write/Read
+struct RemoteBuffer {
+    void* remote_addr;  // Peer's virtual address
+    size_t length;      // Buffer size
+    uint32_t rkey;      // Peer's remote key
+};
+
 enum Status { UNKNOWN, PENDING, SUCCESS, FAILED };
 
 using TaskID = int;
@@ -93,6 +100,26 @@ class RapidTransfer {
 
     // Stop listen thread
     int shutdownListener();
+
+    // RDMA Write: Send data to remote memory
+    // - peer_name: Target peer identifier
+    // - local_buffers: Local memory buffers containing data to send
+    // - remote_buffers: Remote memory descriptors (addr, rkey from peer)
+    //
+    // Flow: RPC notify peer -> peer calls receive() -> peer responds OK -> we call send()
+    TaskID write(const std::string &peer_name,
+                 const std::vector<Buffer> &local_buffers,
+                 const std::vector<RemoteBuffer> &remote_buffers);
+
+    // RDMA Read: Pull data from remote memory
+    // - peer_name: Target peer identifier
+    // - local_buffers: Local memory buffers to store received data
+    // - remote_buffers: Remote memory descriptors (addr, rkey from peer)
+    //
+    // Flow: RPC notify peer -> peer calls send() -> peer responds OK -> we call receive()
+    TaskID read(const std::string &peer_name,
+                const std::vector<Buffer> &local_buffers,
+                const std::vector<RemoteBuffer> &remote_buffers);
 
     int runStep();
 
