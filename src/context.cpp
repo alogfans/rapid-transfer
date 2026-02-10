@@ -47,6 +47,7 @@ int Context::construct(const std::string &device_name, uint8_t rdma_port,
 }
 
 int Context::deconstruct() {
+    RWSpinlock::WriteGuard guard(active_session_lock_);
     active_session_map_.clear();
     controller_.context().unregisterMemoryRegion(
         packet_manager_.getPool().getArena());
@@ -95,6 +96,7 @@ TaskID Context::send(const std::string &peer_name,
         LOG(ERROR) << "cannot assign session id";
         return -1;
     }
+    RWSpinlock::WriteGuard guard(active_session_lock_);
     if (!active_session_map_.count(session)) {
         int ret = packet_manager_.getPool().allocatePacket(
             active_session_map_[session].ack_handle);
@@ -117,6 +119,7 @@ TaskID Context::receive(const std::string &peer_name,
         LOG(ERROR) << "cannot assign session id";
         return -1;
     }
+    RWSpinlock::WriteGuard guard(active_session_lock_);
     if (!active_session_map_.count(session)) {
         int ret = packet_manager_.getPool().allocatePacket(
             active_session_map_[session].ack_handle);
@@ -230,6 +233,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
     const static size_t kRequestBatchSize = 4;
     auto &context = controller_.context();
     Buffer slices[2];
+    RWSpinlock::ReadGuard guard(active_session_lock_);
     for (auto session : active_session_map_) {
         if (current_ts - session.second.last_send_ts < recv_rto_ * 2 / 3)
             continue;
@@ -299,6 +303,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
 
 int Context::sendAckPackets(uint64_t current_ts) {
     Buffer slices[2];
+    RWSpinlock::ReadGuard guard(active_session_lock_);
     for (auto &session : active_session_map_) {
         auto &queue = *session.second.receive_queue;
         PacketHandle &handle = session.second.ack_handle;
@@ -352,6 +357,7 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
         int session =
             controller_.findSession(grh->sgid, wc.src_qp, handle.session);
         if (session >= 0) {
+            RWSpinlock::ReadGuard guard(active_session_lock_);
             assert(active_session_map_.count(session));
             switch (handle.cmd) {
                 case PKT_CMD_DATA: {
@@ -397,6 +403,7 @@ void Context::updateRTO(uint64_t rtt) {
 
 void Context::updateWndOnSuccess(int session, uint32_t rwnd,
                                  SendQueue &send_queue) {
+    // Note: Caller must hold active_session_lock_ (ReadGuard or WriteGuard)
     auto &entry = active_session_map_[session];
     if (entry.cwnd < entry.ssthresh) {
         entry.cwnd++;

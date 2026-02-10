@@ -1,5 +1,2 @@
-add_executable(rdma_multicast_test rdma_multicast_test.cpp)
-target_link_libraries(rdma_multicast_test PUBLIC rapid)
-
-add_executable(packet_manager_test packet_manager_test.cpp)
-target_link_libraries(packet_manager_test PUBLIC rapid gtest)
+add_executable(e2e_test e2e_test.cpp)
+target_link_libraries(e2e_test PUBLIC rapid)

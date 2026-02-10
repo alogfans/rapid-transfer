@@ -47,21 +47,21 @@ class PacketHandle {
 
     PacketHandle();
 
-    int setRawPacket(void *packet_buf, bool with_grh = false);
+    int setRawPacket(void* packet_buf, bool with_grh = false);
 
-    void *getRawPacket() { return packet_buf; }
+    void* getRawPacket() { return packet_buf; }
 
-    int setPayload(void *data, size_t length, bool do_copy = false);
+    int setPayload(void* data, size_t length, bool do_copy = false);
 
-    void *getPayload();
+    void* getPayload();
 
     uint32_t getPayloadLength() { return data_len; }
 
     int deserialize(uint32_t imm_data, uint32_t packet_length);
 
-    int serialize(Buffer *slices, uint32_t &imm_data);
+    int serialize(Buffer* slices, uint32_t& imm_data);
 
-    int serialize(std::vector<Buffer> &slices, uint32_t &imm_data);
+    int serialize(std::vector<Buffer>& slices, uint32_t& imm_data);
 
    public:
     uint8_t session;
@@ -78,9 +78,9 @@ class PacketHandle {
 
     PktHdrImm pkt_hdr_imm;
     bool with_grh;
-    void *packet_buf;
+    void* packet_buf;
     uint32_t data_len;
-    void *data_buf;
+    void* data_buf;
 };
 
 class PacketBufferPool {
@@ -89,20 +89,20 @@ class PacketBufferPool {
 
     ~PacketBufferPool();
 
-    PacketBufferPool(const PacketBufferPool &) = delete;
-    PacketBufferPool &operator=(const PacketBufferPool &) = delete;
+    PacketBufferPool(const PacketBufferPool&) = delete;
+    PacketBufferPool& operator=(const PacketBufferPool&) = delete;
 
-    int construct(const std::string &device_name = "");
+    int construct(const std::string& device_name = "");
 
     int deconstruct();
 
-    void *getArena() const { return arena_; }
+    void* getArena() const { return arena_; }
 
     size_t getCapacity() const { return mtu_size_ * max_packets_; }
 
-    int allocatePacket(PacketHandle &handle, bool with_grh = false);
+    int allocatePacket(PacketHandle& handle, bool with_grh = false);
 
-    int freePacket(PacketHandle &handle);
+    int freePacket(PacketHandle& handle);
 
    private:
     const size_t mtu_size_, max_packets_;
@@ -118,8 +118,8 @@ struct SecondaryQueue {
 
     Buffer popFragment() {
         if (slice_list_.empty()) return {nullptr, 0};
-        auto &slice = slice_list_[0];
-        auto addr = static_cast<char *>(slice.addr) + offset_;
+        auto& slice = slice_list_[0];
+        auto addr = static_cast<char*>(slice.addr) + offset_;
         auto length = std::min(fragment_size_, slice.length - offset_);
         if (offset_ + length == slice.length) {
             slice_list_.erase(slice_list_.begin());
@@ -129,9 +129,9 @@ struct SecondaryQueue {
         return {addr, length};
     }
 
-    std::pair<uint64_t, uint64_t> push(const std::vector<Buffer> &slice_list) {
+    std::pair<uint64_t, uint64_t> push(const std::vector<Buffer>& slice_list) {
         auto start_fragment_id = fragment_id_;
-        for (auto &entry : slice_list) {
+        for (auto& entry : slice_list) {
             slice_list_.push_back(entry);
             fragment_id_ +=
                 (entry.length + fragment_size_ - 1) / fragment_size_;
@@ -152,11 +152,11 @@ struct SecondaryQueue {
 class SendQueue {
    public:
     SendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
-              PacketBufferPool &pool, uint8_t session);
+              PacketBufferPool& pool, uint8_t session);
 
     ~SendQueue();
 
-    int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
+    int push(const std::vector<Buffer>& slice_list, uint32_t& last_sn);
 
     int markCompleted(uint32_t ack_sn);
 
@@ -164,11 +164,11 @@ class SendQueue {
 
     uint32_t getAckSN() const { return SHORT_SN(tail_); }
 
-    int getIndexRange(uint64_t &head, uint64_t &tail);
+    int getIndexRange(uint64_t& head, uint64_t& tail);
 
-    int forEach(std::function<int(PacketHandle &)> func);
+    int forEach(std::function<int(PacketHandle&)> func);
 
-    PacketHandle &getMutableEntry(uint64_t index) {
+    PacketHandle& getMutableEntry(uint64_t index) {
         return handle_[index % queue_capacity_];
     }
 
@@ -177,6 +177,8 @@ class SendQueue {
     }
 
     uint16_t getWndSize() const { return wnd_size_; }
+
+    uint8_t getSessionID() const { return session_; }
 
    private:
     int fillPrimaryQueue();
@@ -187,7 +189,7 @@ class SendQueue {
     std::atomic<uint64_t> head_, tail_;
     std::atomic<uint16_t> wnd_size_;
     std::vector<PacketHandle> handle_;
-    PacketBufferPool &pool_;
+    PacketBufferPool& pool_;
     SecondaryQueue secondary_queue_;
     RWSpinlock queue_lock_;
 };
@@ -195,11 +197,11 @@ class SendQueue {
 class McastSendQueue {
    public:
     McastSendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
-                   PacketBufferPool &pool, uint8_t session, size_t replica_num);
+                   PacketBufferPool& pool, uint8_t session, size_t replica_num);
 
     ~McastSendQueue();
 
-    int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
+    int push(const std::vector<Buffer>& slice_list, uint32_t& last_sn);
 
     int markCompleted(int index, uint32_t ack_sn);
 
@@ -207,11 +209,11 @@ class McastSendQueue {
 
     uint32_t getAckSN(int index = -1) const;
 
-    int getIndexRange(uint64_t &head, uint64_t &tail);
+    int getIndexRange(uint64_t& head, uint64_t& tail);
 
-    int forEach(std::function<int(PacketHandle &)> func);
+    int forEach(std::function<int(PacketHandle&)> func);
 
-    PacketHandle &getMutableEntry(uint64_t index) {
+    PacketHandle& getMutableEntry(uint64_t index) {
         return handle_[index % queue_capacity_];
     }
 
@@ -220,6 +222,8 @@ class McastSendQueue {
     }
 
     uint16_t getWndSize() const { return wnd_size_; }
+
+    uint8_t getSessionID() const { return session_; }
 
    private:
     int fillPrimaryQueue();
@@ -234,7 +238,7 @@ class McastSendQueue {
     std::vector<uint64_t> tail_list_;
     uint16_t wnd_size_;
     std::vector<PacketHandle> handle_;
-    PacketBufferPool &pool_;
+    PacketBufferPool& pool_;
     SecondaryQueue secondary_queue_;
     RWSpinlock queue_lock_;
 };
@@ -244,9 +248,9 @@ class ReceiveQueue {
     ReceiveQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
                  uint8_t session);
 
-    int push(const std::vector<Buffer> &slice_list, uint32_t &last_sn);
+    int push(const std::vector<Buffer>& slice_list, uint32_t& last_sn);
 
-    int markCompleted(PacketHandle &handle);
+    int markCompleted(PacketHandle& handle);
 
     uint32_t getNextSN() const { return SHORT_SN(head_); }
 
@@ -254,7 +258,7 @@ class ReceiveQueue {
 
     uint64_t getLastTS() const { return last_packet_ts_; };
 
-    int getIndexRange(uint64_t &head, uint64_t &tail);
+    int getIndexRange(uint64_t& head, uint64_t& tail);
 
     void setWndSize(uint16_t wnd_size) {
         wnd_size_ = std::min(wnd_size, (uint16_t)queue_capacity_);
@@ -264,11 +268,13 @@ class ReceiveQueue {
 
     uint16_t getAvailableWndSize() const;
 
+    uint8_t getSessionID() const { return session_; }
+
    private:
     int fillPrimaryQueue();
 
     struct Request {
-        void *addr;
+        void* addr;
         size_t length;
         bool inflight;
     };
@@ -292,20 +298,20 @@ class PacketManager {
 
     ~PacketManager();
 
-    PacketManager(const PacketManager &) = delete;
-    PacketManager &operator=(const PacketManager &) = delete;
+    PacketManager(const PacketManager&) = delete;
+    PacketManager& operator=(const PacketManager&) = delete;
 
-    int construct(const std::string &device_name = "");
+    int construct(const std::string& device_name = "");
 
     int deconstruct();
 
-    PacketBufferPool &getPool() { return pool_; }
+    PacketBufferPool& getPool() { return pool_; }
 
-    SendQueue &getSendQueue(int sid);
+    SendQueue& getSendQueue(int sid);
 
-    ReceiveQueue &getReceiveQueue(int sid);
+    ReceiveQueue& getReceiveQueue(int sid);
 
-    McastSendQueue &getMcastSendQueue(int sid);
+    McastSendQueue& getMcastSendQueue(int sid);
 
     size_t mtuSize() const { return mtu_size_; }
 
@@ -315,9 +321,9 @@ class PacketManager {
     const size_t mtu_size_, max_packets_, queue_capacity_, wnd_size_;
     RWSpinlock queue_lock_;
     PacketBufferPool pool_;
-    std::unordered_map<int, SendQueue *> send_queue_;
-    std::unordered_map<int, ReceiveQueue *> receive_queue_;
-    std::unordered_map<int, McastSendQueue *> mcast_send_queue_;
+    std::unordered_map<int, SendQueue*> send_queue_;
+    std::unordered_map<int, ReceiveQueue*> receive_queue_;
+    std::unordered_map<int, McastSendQueue*> mcast_send_queue_;
     std::unordered_map<int, int> mcast_replica_num_;
 };
 

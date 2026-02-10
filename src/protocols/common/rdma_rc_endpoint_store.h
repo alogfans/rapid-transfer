@@ -4,7 +4,6 @@
 #ifndef RDMA_RC_ENDPOINT_STORE_H
 #define RDMA_RC_ENDPOINT_STORE_H
 
-#include "rapid_transfer.h"
 #include "rdma_context.h"
 #include "rdma_rc_endpoint.h"
 

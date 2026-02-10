@@ -1,135 +1,245 @@
 // rapid_transfer.h
 //
-// C++ Interface of RapidTransfer
+// RapidTransfer v1 API (New Engine)
+// Single-rail instance per class, multi-rail orchestration by upper layer
 //
 // Copyright (C) 2024 Feng Ren
 
-#ifndef RAPID_TRANSFER_H
-#define RAPID_TRANSFER_H
+#ifndef RAPID_TRANSFER_V1_H
+#define RAPID_TRANSFER_V1_H
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
 namespace rapid {
+
+// ============================================================================
+// Common Data Types
+// ============================================================================
+
+/// Memory buffer descriptor
 struct Buffer {
-    void *addr;
-    size_t length;
+    void* addr;     // Buffer address
+    size_t length;  // Buffer size in bytes
 };
 
-// Remote buffer descriptor for RDMA Write/Read
+/// Remote buffer descriptor for RDMA Write/Read operations
 struct RemoteBuffer {
     void* remote_addr;  // Peer's virtual address
     size_t length;      // Buffer size
     uint32_t rkey;      // Peer's remote key
 };
 
+/// Transfer status enumeration
 enum Status { UNKNOWN, PENDING, SUCCESS, FAILED };
 
+/// Task identifier type
 using TaskID = int;
 
-class SessionManager;
-class Protocol;
+/// Connection attributes map
+using Attributes = std::unordered_map<std::string, std::string>;
 
-using OnConnectionStateChange = std::function<void(
-    const std::string & /* peer name */, bool /* join or leave */)>;
+}  // namespace rapid
+
+namespace rapid {
+namespace v1 {
+
+// ============================================================================
+// Rail Configuration
+// ============================================================================
+
+struct RailConfig {
+    std::string device_name;  // RDMA device name (e.g., "mlx5_0")
+    uint8_t rdma_port;        // RDMA port number
+    int gid_index;            // GID index
+
+    RailConfig() : rdma_port(1), gid_index(0) {}
+};
+
+// ============================================================================
+// Rail State and Statistics
+// ============================================================================
+
+enum class RailState {
+    ACTIVE,    // Rail is operational
+    DEGRADED,  // Rail is slow but working
+    FAILED,    // Rail has failed
+    DISABLED   // Rail is administratively disabled
+};
+
+struct RailStats {
+    std::string device_name;
+    RailState state;
+    uint64_t bytes_transferred;
+    uint64_t transfer_count;
+    double avg_latency_us;
+    double current_bandwidth_gbps;
+};
+
+// ============================================================================
+// Transfer Result
+// ============================================================================
+
+struct TransferResult {
+    std::string task_id;
+    Status status;
+    size_t total_bytes{0};
+    std::string device_name;
+    double duration_ms{0.0};
+    std::string error_message;
+};
+
+// ============================================================================
+// RapidTransfer v1 - New Engine API
+// ============================================================================
 
 class RapidTransfer {
    public:
-    // Create an instance
-    // Parameters:
-    // - protocol: Transfer protocol name, can be either `rdma-reliable` or
-    // `rdma-unreliable`
-    // - device_name: RDMA NIC name for transfer, e.g. `mlx5_0`
-    // - rdma_port: RDMA NIC port for communication
-    // - gid_index: RDMA Local GID index for communication
-    //
-    // Return Value: RapidTransfer pointer if success, nullptr if failed
-    static std::shared_ptr<RapidTransfer> Create(const std::string &protocol,
-                                                 const std::string &device_name,
-                                                 uint8_t rdma_port,
-                                                 int gid_index);
+    // ========================================================================
+    // Factory and Lifecycle
+    // ========================================================================
 
-    RapidTransfer(const std::string &device_name);
+    /// Create transfer engine instance
+    /// Returns shared_ptr on success, nullptr on failure
+    static std::shared_ptr<RapidTransfer> Create(
+        const RailConfig& rail_config, const std::string& listen_address = "");
 
     virtual ~RapidTransfer();
 
-    // Join current instance to the multicast group
-    int joinMulticast(const std::string &multicast_addr);
+    // Non-copyable, non-movable
+    RapidTransfer(const RapidTransfer&) = delete;
+    RapidTransfer& operator=(const RapidTransfer&) = delete;
 
-    // Leave current instance from the multicast group
-    int leaveMulticast(const std::string &multicast_addr);
+    // ========================================================================
+    // Single-Sided Write
+    // ========================================================================
 
-    // Set peer nodes for multicast transfer. Required for multicast sender size
-    int setMulticastReplicas(const std::string &multicast_addr,
-                             const std::vector<std::string> &peer_name_list);
+    /// Write to remote memory
+    /// notify_message: optional message to send to remote peer
+    TaskID write(const std::string& peer_name,
+                 const std::vector<Buffer>& local_buffers,
+                 const std::vector<RemoteBuffer>& remote_buffers,
+                 const std::string& notify_message = "");
 
-    // Start an asynchronous file transfer task
-    // - peer_name: Hostname of target servers to transfer file
-    // - buffer_list: List of memory buffers, representing the content of
-    // transferred data Return Value: Task ID if success, negative values if
-    // failed
-    TaskID send(const std::string &peer_name,
-                const std::vector<Buffer> &buffer_list);
+    // ========================================================================
+    // Single-Sided Read
+    // ========================================================================
 
-    TaskID receive(const std::string &peer_name,
-                   const std::vector<Buffer> &buffer_list);
+    /// Read from remote memory
+    /// notify_message: optional message to send to remote peer
+    TaskID read(const std::string& peer_name,
+                const std::vector<Buffer>& local_buffers,
+                const std::vector<RemoteBuffer>& remote_buffers,
+                const std::string& notify_message = "");
 
-    // Get send/receive progress
-    Status getStatus(TaskID task_id, size_t *transferred_bytes);
+    // ========================================================================
+    // Notification
+    // ========================================================================
 
-    // Free internal resource for specified task, i.e., call getStatus() is then
-    // undefined
+    /// Notification callback type for receiving messages from remote peers
+    using NotificationCallback =
+        std::function<void(const std::string& peer_name, TaskID task_id,
+                           const std::string& message)>;
+
+    /// Register callback for receiving notification messages from remote peers
+    void setNotificationCallback(NotificationCallback callback);
+
+    /// Send a notification message to remote peer
+    int notify(const std::string& peer_name, TaskID task_id,
+               const std::string& message);
+
+    // ========================================================================
+    // Status and Monitoring
+    // ========================================================================
+
+    /// Get transfer status
+    Status getStatus(TaskID task_id, size_t* transferred_bytes = nullptr);
+
+    /// Wait for transfer completion (blocking)
+    Status wait(TaskID task_id,
+                std::chrono::milliseconds timeout = std::chrono::milliseconds{
+                    5000});
+
+    /// Get detailed transfer result
+    std::optional<TransferResult> getTransferResult(TaskID task_id);
+
+    /// Free task resources
     int freeTask(TaskID task_id);
 
-    // Register local memory region, address regions of Buffer objects must have
-    // been registered
-    int registerLocalMemory(void *addr, size_t length);
+    // ========================================================================
+    // Rail Information
+    // ========================================================================
 
-    // Unregister local memory region
-    int unregisterLocalMemory(void *addr);
+    /// Get rail configuration
+    RailConfig getRailConfig() const;
 
-    // Start listen thread, required if this instance will receive data from
-    // remote
-    int startListener(const std::string &listen_address,
-                      const OnConnectionStateChange &callback);
+    /// Get rail statistics
+    RailStats getRailStats() const;
 
-    // Stop listen thread
-    int shutdownListener();
+    /// Get current rail state
+    RailState getRailState() const;
 
-    // RDMA Write: Send data to remote memory
-    // - peer_name: Target peer identifier
-    // - local_buffers: Local memory buffers containing data to send
-    // - remote_buffers: Remote memory descriptors (addr, rkey from peer)
-    //
-    // Flow: RPC notify peer -> peer calls receive() -> peer responds OK -> we call send()
-    TaskID write(const std::string &peer_name,
-                 const std::vector<Buffer> &local_buffers,
-                 const std::vector<RemoteBuffer> &remote_buffers);
+    // ========================================================================
+    // Memory Registration
+    // ========================================================================
 
-    // RDMA Read: Pull data from remote memory
-    // - peer_name: Target peer identifier
-    // - local_buffers: Local memory buffers to store received data
-    // - remote_buffers: Remote memory descriptors (addr, rkey from peer)
-    //
-    // Flow: RPC notify peer -> peer calls send() -> peer responds OK -> we call receive()
-    TaskID read(const std::string &peer_name,
-                const std::vector<Buffer> &local_buffers,
-                const std::vector<RemoteBuffer> &remote_buffers);
+    /// Register local memory region
+    int registerLocalMemory(void* addr, size_t length);
 
+    /// Unregister local memory region
+    int unregisterLocalMemory(void* addr);
+
+    // ========================================================================
+    // Buffer Info Exchange (for testing)
+    // ========================================================================
+
+    /// Buffer info structure for sharing buffer information between peers
+    struct BufferInfo {
+        uint64_t addr;   // Buffer address as uint64_t for safe serialization
+        uint64_t length; // Buffer size
+        uint32_t rkey;   // Remote key
+    };
+
+    /// Set local buffer info to share with remote peers
+    void setBufferInfo(const BufferInfo& info);
+
+    /// Get remote peer's buffer info via RPC
+    std::optional<BufferInfo> getRemoteBufferInfo(const std::string& peer_address);
+
+    // ========================================================================
+    // Lifecycle Management
+    // ========================================================================
+
+    /// Run one step of progress engine
     int runStep();
 
-   private:
-    int makeConnectionIfNeeded(const std::string &peer_name);
+    /// Shutdown the transfer engine
+    int shutdown();
 
    private:
-    SessionManager *session_manager_;
-    Protocol *protocol_;
+    // ========================================================================
+    // Internal Implementation
+    // ========================================================================
+
+    // Pimpl idiom - forward declaration
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+
+    RapidTransfer() = default;
 };
+
+}  // namespace v1
 }  // namespace rapid
 
-#endif  // RAPID_TRANSFER_H
+#endif  // RAPID_TRANSFER_V1_H

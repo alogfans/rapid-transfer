@@ -7,8 +7,11 @@
 
 #include <unordered_set>
 
+#include "concurrency.h"
 #include "controller.h"
 #include "packet_manager.h"
+#include "rapid_transfer.h"
+#include "session_manager.h"
 
 namespace rapid {
 class Context {
@@ -17,28 +20,28 @@ class Context {
 
     ~Context();
 
-    int construct(const std::string &device_name, uint8_t rdma_port,
+    int construct(const std::string& device_name, uint8_t rdma_port,
                   int gid_index);
 
     int deconstruct();
 
-    TaskID send(const std::string &peer_name,
-                const std::vector<Buffer> &buffer_list);
+    TaskID send(const std::string& peer_name,
+                const std::vector<Buffer>& buffer_list);
 
-    TaskID receive(const std::string &peer_name,
-                   const std::vector<Buffer> &buffer_list);
+    TaskID receive(const std::string& peer_name,
+                   const std::vector<Buffer>& buffer_list);
 
-    Status getStatus(TaskID task_id, size_t *transferred_bytes);
+    Status getStatus(TaskID task_id, size_t* transferred_bytes);
 
     int freeTask(TaskID task_id);
 
-    int prepareConnection(const std::string &peer_addr, Attributes &local);
+    int prepareConnection(const std::string& peer_addr, Attributes& local);
 
-    int setupConnection(const std::string &peer_addr, const Attributes &peer);
+    int setupConnection(const std::string& peer_addr, const Attributes& peer);
 
-    int registerLocalMemory(void *addr, size_t length);
+    int registerLocalMemory(void* addr, size_t length);
 
-    int unregisterLocalMemory(void *addr);
+    int unregisterLocalMemory(void* addr);
 
     int runStep();
 
@@ -51,18 +54,18 @@ class Context {
 
     void updateRTO(uint64_t rtt);
 
-    void updateWndOnSuccess(int session, uint32_t rwnd, SendQueue &send_queue);
+    void updateWndOnSuccess(int session, uint32_t rwnd, SendQueue& send_queue);
 
-    int processReceivedPacket(uint64_t current_ts, ibv_wc &wc);
+    int processReceivedPacket(uint64_t current_ts, ibv_wc& wc);
 
-    int submitNormalRecvWR(PacketHandle &handle);
+    int submitNormalRecvWR(PacketHandle& handle);
 
    private:
     struct Task {
         int session;
         uint32_t last_sn;
         bool is_send;
-        void *queue;
+        void* queue;
     };
 
    private:
@@ -97,18 +100,24 @@ class Context {
 
         uint32_t cwnd, rwnd, ssthresh, incr;
 
-        void setup(PacketManager &mgr, int sid) {
+        void setup(PacketManager& mgr, int sid) {
             send_queue = &mgr.getSendQueue(sid);
             receive_queue = &mgr.getReceiveQueue(sid);
             mcast_send_queue = &mgr.getMcastSendQueue(sid);
+            LOG(INFO) << "Session " << sid << " setup with send_queue "
+                      << (int)send_queue->getSessionID() << " receive_queue "
+                      << (int)receive_queue->getSessionID()
+                      << " mcast_send_queue "
+                      << (int)mcast_send_queue->getSessionID();
         }
 
-        SendQueue *send_queue;
-        ReceiveQueue *receive_queue;
-        McastSendQueue *mcast_send_queue;
+        SendQueue* send_queue;
+        ReceiveQueue* receive_queue;
+        McastSendQueue* mcast_send_queue;
         uint64_t last_send_ts;
     };
     std::unordered_map<int, SessionInfo> active_session_map_;
+    RWSpinlock active_session_lock_;
 
     const static size_t kDefaultRTO = 4096;  // 8us
     const static size_t kMinRTO = 128;
@@ -118,7 +127,7 @@ class Context {
 
     const static size_t kNumReceiveHandles = 128;
     std::vector<PacketHandle> recv_handles_;
-    std::unordered_map<void *, int> recv_handles_qp_index_map_;
+    std::unordered_map<void*, int> recv_handles_qp_index_map_;
 
     struct Stats {
         Stats() : send_packets(0), recv_packets(0), ack_packets(0) {}

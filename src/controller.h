@@ -9,14 +9,16 @@
 #include <map>
 #include <string>
 
+#include "concurrency.h"
 #include "protocols/common/rdma_context.h"
 #include "protocols/common/rdma_multicast.h"
 #include "protocols/common/rdma_ud_endpoint_store.h"
+#include "session_manager.h"
 
 namespace rapid {
 
 struct NodeAddress {
-    bool operator==(const NodeAddress &rhs) const {
+    bool operator==(const NodeAddress& rhs) const {
         return memcmp(&gid, &rhs.gid, sizeof(ibv_gid)) == 0 &&
                qp_num == rhs.qp_num;
     }
@@ -26,9 +28,9 @@ struct NodeAddress {
 };
 
 struct NodeAddressHash {
-    std::size_t operator()(const NodeAddress &p) const {
+    std::size_t operator()(const NodeAddress& p) const {
         size_t gid_hash = 0;
-        const char *gid_bytes = reinterpret_cast<const char *>(&p.gid);
+        const char* gid_bytes = reinterpret_cast<const char*>(&p.gid);
         for (size_t i = 0; i < sizeof(ibv_gid); ++i) {
             gid_hash = gid_hash * 31 + gid_bytes[i];
         }
@@ -44,28 +46,28 @@ class Controller {
 
     ~Controller();
 
-    Controller(const Controller &) = delete;
-    Controller &operator=(const Controller &) = delete;
+    Controller(const Controller&) = delete;
+    Controller& operator=(const Controller&) = delete;
 
-    int construct(const std::string &device_name, uint8_t rdma_port,
+    int construct(const std::string& device_name, uint8_t rdma_port,
                   int gid_index);
 
     int deconstruct();
 
-    int joinMulticast(const std::string &multicast_addr);
+    int joinMulticast(const std::string& multicast_addr);
 
-    int leaveMulticast(const std::string &multicast_addr);
+    int leaveMulticast(const std::string& multicast_addr);
 
     std::shared_ptr<RdmaMulticastContext> getMulticastContext(
-        const std::string &multicast_addr);
+        const std::string& multicast_addr);
 
-    int prepareConnection(const std::string &peer_addr, Attributes &local);
+    int prepareConnection(const std::string& peer_addr, Attributes& local);
 
-    int setupConnection(const std::string &peer_addr, const Attributes &peer);
+    int setupConnection(const std::string& peer_addr, const Attributes& peer);
 
-    int findSession(ibv_gid &gid, uint32_t qp_num, uint8_t session);
+    int findSession(ibv_gid& gid, uint32_t qp_num, uint8_t session);
 
-    int findSession(const std::string &peer_addr, uint8_t session);
+    int findSession(const std::string& peer_addr, uint8_t session);
 
     std::shared_ptr<RdmaUDEndPoint> getOrCreateEndpoint(int session);
 
@@ -74,19 +76,19 @@ class Controller {
     using MulticastContextMap =
         std::map<std::string, std::shared_ptr<RdmaMulticastContext>>;
 
-    const MulticastContextMap &getMulticastContextMap() const {
+    const MulticastContextMap& getMulticastContextMap() const {
         return multicast_context_map_;
     }
 
-    int redirectMulticast(int sid, int &index);
+    int redirectMulticast(int sid, int& index);
 
-    RdmaContext &context() { return context_; }
+    RdmaContext& context() { return context_; }
 
-    RdmaUDEndPointStore &endpointStore() { return endpoint_store_; }
+    RdmaUDEndPointStore& endpointStore() { return endpoint_store_; }
 
    private:
-    void registerNode(const std::string &peer_addr, ibv_gid &gid,
-                      const std::vector<uint32_t> &qp_num_list);
+    void registerNode(const std::string& peer_addr, ibv_gid& gid,
+                      const std::vector<uint32_t>& qp_num_list);
 
    private:
     RdmaContext context_;
