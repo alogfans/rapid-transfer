@@ -173,6 +173,18 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
         session_manager_->setWriteReadCallbacks(on_write_request,
                                                 on_read_request);
 
+        // Set up notification callback - handles incoming notifications from
+        // peers
+        ::rapid::SessionManager::OnNotificationCallback on_notification =
+            [this](const std::string& peer_name, int task_id,
+                   const std::string& message) {
+                std::lock_guard<std::mutex> lock(notification_mutex_);
+                if (user_notification_callback_) {
+                    user_notification_callback_(peer_name, task_id, message);
+                }
+            };
+        session_manager_->setNotificationCallback(on_notification);
+
         ret = session_manager_->startListener(listen_address, on_accept,
                                               on_error);
         if (ret) {
@@ -384,7 +396,8 @@ TaskID RapidTransfer::Impl::write(
     if (!notify_message.empty()) {
         std::lock_guard<std::mutex> lock(notifications_mutex_);
         pending_notifications_[ret] = {peer_name, notify_message, false};
-        LOG(INFO) << "[RapidTransfer] Registered notification for task_id=" << ret;
+        LOG(INFO) << "[RapidTransfer] Registered notification for task_id="
+                  << ret;
     }
 
     return ret;
@@ -463,7 +476,8 @@ TaskID RapidTransfer::Impl::read(
     if (!notify_message.empty()) {
         std::lock_guard<std::mutex> lock(notifications_mutex_);
         pending_notifications_[ret] = {peer_name, notify_message, false};
-        LOG(INFO) << "[RapidTransfer] Registered notification for task_id=" << ret;
+        LOG(INFO) << "[RapidTransfer] Registered notification for task_id="
+                  << ret;
     }
 
     return ret;
@@ -513,10 +527,10 @@ Status RapidTransfer::Impl::getStatus(TaskID task_id,
 
             task_cv_.notify_all();
         }
-        return it->second.status;
     }
 
-    return Status::UNKNOWN;
+    // Always return the actual status from UD context
+    return status;
 }
 
 Status RapidTransfer::Impl::wait(TaskID task_id,
@@ -695,12 +709,13 @@ void RapidTransfer::Impl::setBufferInfo(const RapidTransfer::BufferInfo& info) {
         session_manager_->setBufferInfo(
             ::rapid::BufferInfo{info.addr, info.length, info.rkey});
     } else {
-        LOG(WARNING) << "[RapidTransfer] No SessionManager available, cannot set buffer info";
+        LOG(WARNING) << "[RapidTransfer] No SessionManager available, cannot "
+                        "set buffer info";
     }
 }
 
-std::optional<RapidTransfer::BufferInfo> RapidTransfer::Impl::getRemoteBufferInfo(
-    const std::string& peer_address) {
+std::optional<RapidTransfer::BufferInfo>
+RapidTransfer::Impl::getRemoteBufferInfo(const std::string& peer_address) {
     using namespace async_simple::coro;
 
     if (!session_manager_) {
@@ -719,15 +734,16 @@ std::optional<RapidTransfer::BufferInfo> RapidTransfer::Impl::getRemoteBufferInf
     coro_rpc::coro_rpc_client* client =
         session_manager_->getRPCClient(peer_address);
     if (!client) {
-        LOG(ERROR) << "[RapidTransfer] No RPC client for peer: " << peer_address;
+        LOG(ERROR) << "[RapidTransfer] No RPC client for peer: "
+                   << peer_address;
         return std::nullopt;
     }
 
     // Call RPC to get buffer info
     auto rpc_result =
         client->send_request<&::rapid::SessionManager::getBufferInfo>();
-    std::optional<::rapid::BufferInfo> result =
-        syncAwait([&]() -> async_simple::coro::Lazy<std::optional<::rapid::BufferInfo>> {
+    std::optional<::rapid::BufferInfo> result = syncAwait(
+        [&]() -> async_simple::coro::Lazy<std::optional<::rapid::BufferInfo>> {
             auto r = co_await co_await rpc_result;
             if (!r) {
                 LOG(ERROR) << "[RapidTransfer] GetBufferInfo RPC failed: "
@@ -742,7 +758,8 @@ std::optional<RapidTransfer::BufferInfo> RapidTransfer::Impl::getRemoteBufferInf
     }
 
     // Convert to public BufferInfo type
-    return RapidTransfer::BufferInfo{result->addr, result->length, result->rkey};
+    return RapidTransfer::BufferInfo{result->addr, result->length,
+                                     result->rkey};
 }
 
 // ============================================================================
