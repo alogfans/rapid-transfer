@@ -101,37 +101,12 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
                            << peer_name;
             };
 
-        // Set up write request callback - handles incoming write requests from
-        // peers
-        ::rapid::SessionManager::OnWriteRequestCallback on_write_request =
-            [this](const std::string& peer_name,
-                   const std::vector<Buffer>& buffers) -> int {
-            // Remote peer wants us to receive data into buffers
-            // Get session name for this peer
-            std::string session_name = peer_name;
-            auto it = peer_to_session_map_.find(peer_name);
-            if (it != peer_to_session_map_.end()) {
-                session_name = it->second;
-            }
-
-            // Post receive buffers
-            int ret = ud_context_.receive(session_name, buffers);
-            if (ret < 0) {
-                LOG(ERROR) << "[RapidTransfer] Failed to post receive "
-                              "buffers, ret="
-                           << ret;
-                return -1;
-            }
-
-            return 0;
-        };
-
         // Set up read request callback - handles incoming read requests from
         // peers
         ::rapid::SessionManager::OnReadRequestCallback on_read_request =
             [this](const std::string& peer_name,
-                   const std::vector<Buffer>& buffers) -> int {
-            // Remote peer wants us to send data from buffers
+                   const std::vector<Buffer>& local_targets,
+                   const std::vector<Buffer>& data_sources) -> int {
             // Get session name for this peer
             std::string session_name = peer_name;
             auto it = peer_to_session_map_.find(peer_name);
@@ -139,21 +114,22 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
                 session_name = it->second;
             }
 
-            // Post send buffers
-            int ret = ud_context_.send(session_name, buffers);
-            if (ret < 0) {
-                LOG(ERROR)
-                    << "[RapidTransfer] Failed to post send buffers, ret="
-                    << ret;
+            // Send data from data_sources to local_targets (using direct write)
+            TaskID task_id =
+                ud_context_.send(session_name, data_sources, local_targets);
+            if (task_id < 0) {
+                LOG(ERROR) << "[RapidTransfer] Failed to send data for read "
+                              "request, ret="
+                           << task_id;
                 return -1;
             }
 
-            return 0;
+            // Return task_id so reader can track progress
+            return task_id;
         };
 
-        // Register the write/read callbacks
-        session_manager_->setWriteReadCallbacks(on_write_request,
-                                                on_read_request);
+        // Register the read callback
+        session_manager_->setReadCallback(on_read_request);
 
         // Set up notification callback - handles incoming notifications from
         // peers
@@ -359,18 +335,30 @@ TaskID RapidTransfer::Impl::read(const std::string& peer_name,
     // 2. Get the session name for this peer
     std::string session_name = session_manager_->getSessionName(peer_name);
 
-    // 3. Serialize remote_buffers to JSON
-    Json::Value json_array(Json::arrayValue);
+    // 3. Serialize buffers to JSON
+    // local_buffers = where to put received data (becomes remote_targets for
+    // sender) remote_buffers = where to read data from (sender's local data)
+    Json::Value json_root;
+    Json::Value local_array(Json::arrayValue);
+    for (const auto& buf : local_buffers) {
+        Json::Value item;
+        item["addr"] = std::to_string(reinterpret_cast<uintptr_t>(buf.addr));
+        item["length"] = Json::Value::UInt64(buf.length);
+        local_array.append(item);
+    }
+    Json::Value remote_array(Json::arrayValue);
     for (const auto& buf : remote_buffers) {
         Json::Value item;
         item["addr"] = std::to_string(reinterpret_cast<uintptr_t>(buf.addr));
         item["length"] = Json::Value::UInt64(buf.length);
-        json_array.append(item);
+        remote_array.append(item);
     }
+    json_root["local"] = local_array;
+    json_root["remote"] = remote_array;
     Json::StreamWriterBuilder writer;
-    std::string buffers_json = Json::writeString(writer, json_array);
+    std::string buffers_json = Json::writeString(writer, json_root);
 
-    // 4. RPC call to notify remote peer to prepare send
+    // 4. RPC call to notify remote peer to send data to our buffers
     coro_rpc::coro_rpc_client* client =
         session_manager_->getRPCClient(peer_name);
     if (!client) {
@@ -393,27 +381,22 @@ TaskID RapidTransfer::Impl::read(const std::string& peer_name,
             co_return r->result();
         }());
 
-    if (!result || result.value() != 0) {
-        LOG(ERROR) << "[RapidTransfer] Remote peer failed to prepare send";
+    if (!result || result.value() < 0) {
+        LOG(ERROR) << "[RapidTransfer] Remote peer failed to send data";
         return -1;
     }
 
-    // 5. Call local receive to get data
-    ret = ud_context_.receive(session_name, local_buffers);
-    if (ret < 0) {
-        LOG(ERROR) << "[RapidTransfer] Receive failed after RPC";
-        return ret;
-    }
+    TaskID task_id = result.value();
 
-    // 6. Register notification if provided (will be sent in getStatus())
+    // 5. Register notification if provided (will be sent in getStatus())
     if (!notify_message.empty()) {
         std::lock_guard<std::mutex> lock(notifications_mutex_);
-        pending_notifications_[ret] = {peer_name, notify_message, false};
+        pending_notifications_[task_id] = {peer_name, notify_message, false};
         LOG(INFO) << "[RapidTransfer] Registered notification for task_id="
-                  << ret;
+                  << task_id;
     }
 
-    return ret;
+    return task_id;
 }
 
 // ============================================================================

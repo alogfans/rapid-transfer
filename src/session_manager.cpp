@@ -158,20 +158,6 @@ int SessionManager::connect(const std::string& address,
     return 0;
 }
 
-bool SessionManager::isMulticastAddress(const std::string& address) {
-    if (address.find(":") != address.npos) return false;
-    std::istringstream iss(address);
-    std::string token;
-    std::vector<int> bytes;
-    while (std::getline(iss, token, '.')) {
-        bytes.push_back(std::stoi(token));
-    }
-    if (bytes.size() != 4) {
-        return false;
-    }
-    return bytes[0] >= 224 && bytes[0] <= 239;
-}
-
 int SessionManager::disconnect(const std::string& address) {
     RWSpinlock::WriteGuard guard(sessions_lock_);
     sessions_.erase(address);
@@ -232,10 +218,7 @@ int SessionManager::writeAttributes(std::string& json_string,
     return 0;
 }
 
-void SessionManager::setWriteReadCallbacks(
-    const OnWriteRequestCallback& on_write,
-    const OnReadRequestCallback& on_read) {
-    on_write_request_ = on_write;
+void SessionManager::setReadCallback(const OnReadRequestCallback& on_read) {
     on_read_request_ = on_read;
 }
 
@@ -258,36 +241,8 @@ int SessionManager::handleNotification(const std::string& peer_name,
 int SessionManager::handleWriteRequest(const std::string& peer_name,
                                        const std::string& session_name,
                                        const std::string& buffers_json) {
-    if (!on_write_request_) {
-        LOG(ERROR) << "No write request callback registered";
-        return -1;
-    }
-
-    // Parse JSON array of Buffer objects
-    Json::CharReaderBuilder reader;
-    Json::Value json_array;
-    std::string errs;
-    std::istringstream iss(buffers_json);
-    if (!Json::parseFromStream(reader, iss, &json_array, &errs)) {
-        LOG(ERROR) << "Failed to parse buffers JSON: " << errs;
-        return -1;
-    }
-
-    if (!json_array.isArray()) {
-        LOG(ERROR) << "Expected JSON array for buffers";
-        return -1;
-    }
-
-    // Convert JSON array to vector<Buffer>
-    std::vector<Buffer> buffers;
-    for (const auto& item : json_array) {
-        Buffer buf;
-        buf.addr = reinterpret_cast<void*>(std::stoull(item["addr"].asString()));
-        buf.length = item["length"].asUInt64();
-        buffers.push_back(buf);
-    }
-    int result = on_write_request_(session_name, buffers);
-    return result;
+    LOG(ERROR) << "Write requests are no longer supported";
+    return -1;
 }
 
 int SessionManager::handleReadRequest(const std::string& peer_name,
@@ -298,32 +253,49 @@ int SessionManager::handleReadRequest(const std::string& peer_name,
         return -1;
     }
 
-    // Parse JSON array of Buffer objects
+    // Parse JSON with local and remote buffer arrays
     Json::CharReaderBuilder reader;
-    Json::Value json_array;
+    Json::Value json_root;
     std::string errs;
     std::istringstream iss(buffers_json);
-    if (!Json::parseFromStream(reader, iss, &json_array, &errs)) {
+    if (!Json::parseFromStream(reader, iss, &json_root, &errs)) {
         LOG(ERROR) << "Failed to parse buffers JSON: " << errs;
         return -1;
     }
 
-    if (!json_array.isArray()) {
-        LOG(ERROR) << "Expected JSON array for buffers";
+    if (!json_root.isMember("local") || !json_root.isMember("remote")) {
+        LOG(ERROR) << "Expected JSON with 'local' and 'remote' arrays";
         return -1;
     }
 
-    // Convert JSON array to vector<Buffer>
-    std::vector<Buffer> buffers;
-    for (const auto& item : json_array) {
+    const Json::Value& local_array = json_root["local"];
+    const Json::Value& remote_array = json_root["remote"];
+
+    if (!local_array.isArray() || !remote_array.isArray()) {
+        LOG(ERROR) << "Expected JSON arrays for local and remote";
+        return -1;
+    }
+
+    // Convert local array (reader's receive buffers = our remote_targets)
+    std::vector<Buffer> local_targets;
+    for (const auto& item : local_array) {
         Buffer buf;
         buf.addr = reinterpret_cast<void*>(std::stoull(item["addr"].asString()));
         buf.length = item["length"].asUInt64();
-        buffers.push_back(buf);
+        local_targets.push_back(buf);
     }
 
-    // Pass session_name to callback instead of peer_name
-    return on_read_request_(session_name, buffers);
+    // Convert remote array (data to read from = our data sources)
+    std::vector<Buffer> data_sources;
+    for (const auto& item : remote_array) {
+        Buffer buf;
+        buf.addr = reinterpret_cast<void*>(std::stoull(item["addr"].asString()));
+        buf.length = item["length"].asUInt64();
+        data_sources.push_back(buf);
+    }
+
+    // Pass session_name and both buffer arrays to callback
+    return on_read_request_(session_name, local_targets, data_sources);
 }
 
 // Buffer info management for e2e testing

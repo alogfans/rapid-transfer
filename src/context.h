@@ -29,9 +29,6 @@ class Context {
                 const std::vector<Buffer>& local_buffers,
                 const std::vector<Buffer>& remote_buffers = {});
 
-    TaskID receive(const std::string& peer_name,
-                   const std::vector<Buffer>& buffer_list);
-
     Status getStatus(TaskID task_id, size_t* transferred_bytes);
 
     int freeTask(TaskID task_id);
@@ -94,8 +91,6 @@ class Context {
               ssthresh(kMinSSThreshValue),
               incr(0),
               send_queue(nullptr),
-              receive_queue(nullptr),
-              mcast_send_queue(nullptr),
               last_send_ts(0) {}
 
         PacketHandle ack_handle;
@@ -107,20 +102,11 @@ class Context {
 
         void setup(PacketManager& mgr, int sid) {
             send_queue = &mgr.getSendQueue(sid);
-            receive_queue = &mgr.getReceiveQueue(sid);
-            mcast_send_queue = &mgr.getMcastSendQueue(sid);
-            LOG(INFO) << "Session " << sid << " setup with send_queue "
-                      << (int)send_queue->getSessionID() << " receive_queue "
-                      << (int)receive_queue->getSessionID()
-                      << " mcast_send_queue "
-                      << (int)mcast_send_queue->getSessionID();
         }
 
         SendQueue* send_queue;
-        ReceiveQueue* receive_queue;
-        McastSendQueue* mcast_send_queue;
+        AckQueue ack_queue;
         uint64_t last_send_ts;
-        DirectWriteQueue direct_write_queue;
     };
     std::unordered_map<int, SessionInfo> active_session_map_;
     RWSpinlock active_session_lock_;

@@ -245,108 +245,13 @@ class SendQueue {
     RWSpinlock queue_lock_;
 };
 
-class McastSendQueue {
-   public:
-    McastSendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
-                   PacketBufferPool& pool, uint8_t session, size_t replica_num);
-
-    ~McastSendQueue();
-
-    int push(const std::vector<Buffer>& slice_list, uint32_t& last_sn);
-
-    int markCompleted(int index, uint32_t ack_sn);
-
-    uint32_t getNextSN() const { return SHORT_SN(head_); }
-
-    uint32_t getAckSN(int index = -1) const;
-
-    int getIndexRange(uint64_t& head, uint64_t& tail);
-
-    int forEach(std::function<int(PacketHandle&)> func);
-
-    PacketHandle& getMutableEntry(uint64_t index) {
-        return handle_[index % queue_capacity_];
-    }
-
-    void setWndSize(uint16_t wnd_size) {
-        wnd_size_ = std::min(wnd_size, (uint16_t)queue_capacity_);
-    }
-
-    uint16_t getWndSize() const { return wnd_size_; }
-
-    uint8_t getSessionID() const { return session_; }
-
-   private:
-    int fillPrimaryQueue();
-
-    uint64_t getMinTailIndex() const;
-
-   private:
-    const size_t mtu_size_, queue_capacity_;
-    const uint8_t session_;
-    const size_t replica_num_;
-    uint64_t head_;
-    std::vector<uint64_t> tail_list_;
-    uint16_t wnd_size_;
-    std::vector<PacketHandle> handle_;
-    PacketBufferPool& pool_;
-    SecondaryQueue secondary_queue_;
-    RWSpinlock queue_lock_;
-};
-
-class ReceiveQueue {
-   public:
-    ReceiveQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
-                 uint8_t session);
-
-    int push(const std::vector<Buffer>& slice_list, uint32_t& last_sn);
-
-    int markCompleted(PacketHandle& handle);
-
-    uint32_t getNextSN() const { return SHORT_SN(head_); }
-
-    uint32_t getAckSN() const { return SHORT_SN(tail_); }
-
-    uint64_t getLastTS() const { return last_packet_ts_; };
-
-    int getIndexRange(uint64_t& head, uint64_t& tail);
-
-    void setWndSize(uint16_t wnd_size) {
-        wnd_size_ = std::min(wnd_size, (uint16_t)queue_capacity_);
-    }
-
-    uint16_t getWndSize() const { return wnd_size_; }
-
-    uint16_t getAvailableWndSize() const;
-
-    uint8_t getSessionID() const { return session_; }
-
-   private:
-    int fillPrimaryQueue();
-
-    struct Request {
-        void* addr;
-        size_t length;
-        bool inflight;
-    };
-
-    const size_t mtu_size_, queue_capacity_;
-    const uint8_t session_;
-    std::atomic<uint64_t> head_, tail_;
-    std::atomic<uint16_t> wnd_size_;
-    std::vector<Request> requests_;
-    SecondaryQueue secondary_queue_;
-    uint64_t last_packet_ts_;
-    RWSpinlock queue_lock_;
-};
-
 // Direct write queue for tracking received packets in direct write mode
 // Similar to ReceiveQueue but without push() semantics (no pre-posted buffers)
 // Data is copied directly to remote_addr, we only track sequence numbers for
 // ACK
-class DirectWriteQueue {
+class AckQueue {
    public:
-    DirectWriteQueue() : tail_(0), last_packet_ts_(0) {}
+    AckQueue() : tail_(0), last_packet_ts_(0) {}
 
     // Mark a packet as received and copy data to remote_addr
     // Similar to ReceiveQueue::markCompleted but data goes to
@@ -419,22 +324,13 @@ class PacketManager {
 
     SendQueue& getSendQueue(int sid);
 
-    ReceiveQueue& getReceiveQueue(int sid);
-
-    McastSendQueue& getMcastSendQueue(int sid);
-
     size_t mtuSize() const { return mtu_size_; }
-
-    int setMulticastReplicaNum(int group_id, size_t replica_num);
 
    private:
     const size_t mtu_size_, max_packets_, queue_capacity_, wnd_size_;
     RWSpinlock queue_lock_;
     PacketBufferPool pool_;
     std::unordered_map<int, SendQueue*> send_queue_;
-    std::unordered_map<int, ReceiveQueue*> receive_queue_;
-    std::unordered_map<int, McastSendQueue*> mcast_send_queue_;
-    std::unordered_map<int, int> mcast_replica_num_;
 };
 
 }  // namespace rapid

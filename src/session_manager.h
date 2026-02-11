@@ -39,9 +39,12 @@ class SessionManager {
                           const std::vector<Buffer>& buffers)>;
 
     // Callback for handling read requests from remote peers
+    // local_targets: where to send data (reader's receive buffers as remote_addr)
+    // data_sources: where to read data from (sender's local data)
     using OnReadRequestCallback =
         std::function<int(const std::string& peer_name,
-                          const std::vector<Buffer>& buffers)>;
+                          const std::vector<Buffer>& local_targets,
+                          const std::vector<Buffer>& data_sources)>;
 
     SessionManager() {}
 
@@ -62,17 +65,14 @@ class SessionManager {
 
     bool hasConnection(const std::string& address);
 
-    bool isMulticastAddress(const std::string& address);
-
     // Get the generated session name for a peer address
     std::string getSessionName(const std::string& peer_address);
 
     // Get the cached RPC client for a peer (returns nullptr if not found)
     coro_rpc::coro_rpc_client* getRPCClient(const std::string& peer_address);
 
-    // Set callbacks for write/read requests
-    void setWriteReadCallbacks(const OnWriteRequestCallback& on_write,
-                               const OnReadRequestCallback& on_read);
+    // Set callback for read requests
+    void setReadCallback(const OnReadRequestCallback& on_read);
 
     // RPC handlers for write/read requests (need to be public for coro_rpc)
     int handleWriteRequest(const std::string& peer_name,
@@ -111,7 +111,6 @@ class SessionManager {
     coro_rpc::coro_rpc_server* server_ = nullptr;
     OnAcceptCallback on_accept_;
     OnErrorCallback on_error_;
-    OnWriteRequestCallback on_write_request_;
     OnReadRequestCallback on_read_request_;
     OnNotificationCallback on_notification_;
 

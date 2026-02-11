@@ -119,38 +119,12 @@ int Context::ensureSessionInitialized(int session) {
     return 0;
 }
 
-TaskID Context::receive(const std::string& peer_name,
-                        const std::vector<Buffer>& buffer_list) {
-    int session = controller_.findSession(peer_name, 0);
-    if (session < 0) {
-        LOG(ERROR) << "cannot assign session id";
-        return -1;
-    }
-    RWSpinlock::WriteGuard guard(active_session_lock_);
-    int ret = ensureSessionInitialized(session);
-    if (ret) return ret;
-    uint32_t last_sn = 0;
-    auto& queue = *active_session_map_[session].receive_queue;
-    ret = queue.push(buffer_list, last_sn);
-    if (ret) return ret;
-    int task_id = next_task_id_.fetch_add(1);
-    task_map_[task_id] = Task{session, last_sn, false, &queue};
-    return task_id;
-}
-
 Status Context::getStatus(TaskID task_id, size_t* transferred_bytes) {
     if (!task_map_.count(task_id)) return Status::UNKNOWN;
     auto& task = task_map_[task_id];
-    uint32_t ack_sn, next_sn;
-    if (task.is_send) {
-        auto& queue = *(SendQueue*)task.queue;
-        ack_sn = queue.getAckSN();
-        next_sn = queue.getNextSN();
-    } else {
-        auto& queue = *(ReceiveQueue*)task.queue;
-        ack_sn = queue.getAckSN();
-        next_sn = queue.getNextSN();
-    }
+    auto& queue = *(SendQueue*)task.queue;
+    uint32_t ack_sn = queue.getAckSN();
+    uint32_t next_sn = queue.getNextSN();
     if (ack_sn <= next_sn) {
         if (task.last_sn <= ack_sn) return Status::SUCCESS;
     } else {
@@ -316,26 +290,13 @@ int Context::sendAckPackets(uint64_t current_ts) {
         handle.cmd = PKT_CMD_ACK;
         const static uint64_t kMinWindowSize = 8;
 
-        // Determine which queue to use for ACK generation
-        // Use direct_write_queue if active (has received direct write packets)
-        // Otherwise use receive_queue (normal mode with pre-posted buffers)
+        // Use write_ack_queue for ACK generation (direct write mode only)
         uint64_t head, tail;
-        uint64_t dw_head, dw_tail;
-        session.second.receive_queue->getIndexRange(head, tail);
-        session.second.direct_write_queue.getIndexRange(dw_head, dw_tail);
+        session.second.ack_queue.getIndexRange(head, tail);
 
-        // Use direct write queue if it has received packets (tail > 0)
-        bool use_direct_write = (dw_tail > 0);
-
-        if (use_direct_write) {
-            handle.sn = session.second.direct_write_queue.getAckSN();
-            handle.ts = session.second.direct_write_queue.getLastTS();
-            handle.wnd = std::max(dw_head - dw_tail, kMinWindowSize);
-        } else {
-            handle.sn = session.second.receive_queue->getAckSN();
-            handle.ts = session.second.receive_queue->getLastTS();
-            handle.wnd = std::max(head - tail, kMinWindowSize);
-        }
+        handle.sn = session.second.ack_queue.getAckSN();
+        handle.ts = session.second.ack_queue.getLastTS();
+        handle.wnd = std::max(head - tail, kMinWindowSize);
 
         handle.inflight = true;
         uint32_t imm_data;
@@ -393,20 +354,10 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc& wc) {
             switch (handle.cmd) {
                 case PKT_CMD_DATA: {
                     auto& session_entry = active_session_map_[session];
-                    // Check if this packet has remote write target (direct write mode)
-                    if (handle.remote_addr != 0) {
-                        // Direct write mode: use DirectWriteQueue (handles memcpy internally)
-                        session_entry.direct_write_queue.markCompleted(handle);
-                        stats_.recv_packets.fetch_add(
-                            1, std::memory_order_relaxed);
-                        session_entry.recv_packets++;
-                    } else {
-                        // Normal mode: use ReceiveQueue
-                        session_entry.receive_queue->markCompleted(handle);
-                        stats_.recv_packets.fetch_add(
-                            1, std::memory_order_relaxed);
-                        session_entry.recv_packets++;
-                    }
+                    session_entry.ack_queue.markCompleted(handle);
+                    stats_.recv_packets.fetch_add(
+                        1, std::memory_order_relaxed);
+                    session_entry.recv_packets++;
                     break;
                 }
                 case PKT_CMD_ACK: {

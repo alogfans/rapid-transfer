@@ -46,10 +46,8 @@ struct Protocol {
                                 const Attributes &peer) = 0;
 
     virtual TaskID send(const std::string &peer_name,
-                        const std::vector<Buffer> &buffer_list) = 0;
-
-    virtual TaskID receive(const std::string &peer_name,
-                           const std::vector<Buffer> &buffer_list) = 0;
+                        const std::vector<Buffer> &local_buffers,
+                        const std::vector<Buffer> &remote_buffers = {}) = 0;
 
     virtual Status getStatus(TaskID task_id, size_t *transferred_bytes) = 0;
 
