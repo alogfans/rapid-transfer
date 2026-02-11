@@ -45,6 +45,8 @@ class Context {
 
     int runStep();
 
+    size_t mtuSize() const { return mtu_size_; }
+
    private:
     int pollCompletedPackets(int cq_index, uint64_t current_ts);
 

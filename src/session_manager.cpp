@@ -246,10 +246,6 @@ void SessionManager::setNotificationCallback(OnNotificationCallback callback) {
 int SessionManager::handleNotification(const std::string& peer_name,
                                        int task_id,
                                        const std::string& message) {
-    std::cerr << "[SessionManager::handleNotification] Received from peer="
-              << peer_name << ", task_id=" << task_id << ", message=" << message
-              << std::endl;
-
     if (on_notification_) {
         on_notification_(peer_name, task_id, message);
         return 0;
@@ -262,10 +258,6 @@ int SessionManager::handleNotification(const std::string& peer_name,
 int SessionManager::handleWriteRequest(const std::string& peer_name,
                                        const std::string& session_name,
                                        const std::string& buffers_json) {
-    std::cerr << "[SessionManager::handleWriteRequest] Called, peer="
-              << peer_name << ", session=" << session_name << std::endl;
-    std::cerr.flush();
-
     if (!on_write_request_) {
         LOG(ERROR) << "No write request callback registered";
         return -1;
@@ -286,10 +278,6 @@ int SessionManager::handleWriteRequest(const std::string& peer_name,
         return -1;
     }
 
-    std::cerr << "[SessionManager::handleWriteRequest] Parsed "
-              << json_array.size() << " buffers" << std::endl;
-    std::cerr.flush();
-
     // Convert JSON array to vector<RemoteBuffer>
     std::vector<RemoteBuffer> remote_buffers;
     for (const auto& item : json_array) {
@@ -299,18 +287,8 @@ int SessionManager::handleWriteRequest(const std::string& peer_name,
         buf.length = item["length"].asUInt64();
         buf.rkey = item["rkey"].asUInt();
         remote_buffers.push_back(buf);
-        std::cerr << "[SessionManager::handleWriteRequest] Buffer: addr=0x"
-                  << std::hex << (uintptr_t)buf.remote_addr << std::dec
-                  << " len=" << buf.length << std::endl;
     }
-
-    std::cerr << "[SessionManager::handleWriteRequest] Calling callback with "
-                 "session_name="
-              << session_name << "..." << std::endl;
-    // Pass session_name to callback instead of peer_name
     int result = on_write_request_(session_name, remote_buffers);
-    std::cerr << "[SessionManager::handleWriteRequest] Callback returned: "
-              << result << std::endl;
     return result;
 }
 

@@ -252,10 +252,7 @@ int RapidTransfer::Impl::makeConnectionIfNeeded(const std::string& peer_name) {
         return -1;
     }
 
-    // Check if already connected
     if (session_manager_->hasConnection(peer_name)) {
-        LOG(INFO) << "[RapidTransfer] Connection already exists for: "
-                  << peer_name;
         return 0;
     }
 
