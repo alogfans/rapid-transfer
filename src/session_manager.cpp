@@ -263,7 +263,7 @@ int SessionManager::handleWriteRequest(const std::string& peer_name,
         return -1;
     }
 
-    // Parse JSON array of RemoteBuffer objects
+    // Parse JSON array of Buffer objects
     Json::CharReaderBuilder reader;
     Json::Value json_array;
     std::string errs;
@@ -278,17 +278,15 @@ int SessionManager::handleWriteRequest(const std::string& peer_name,
         return -1;
     }
 
-    // Convert JSON array to vector<RemoteBuffer>
-    std::vector<RemoteBuffer> remote_buffers;
+    // Convert JSON array to vector<Buffer>
+    std::vector<Buffer> buffers;
     for (const auto& item : json_array) {
-        RemoteBuffer buf;
-        buf.remote_addr =
-            reinterpret_cast<void*>(std::stoull(item["addr"].asString()));
+        Buffer buf;
+        buf.addr = reinterpret_cast<void*>(std::stoull(item["addr"].asString()));
         buf.length = item["length"].asUInt64();
-        buf.rkey = item["rkey"].asUInt();
-        remote_buffers.push_back(buf);
+        buffers.push_back(buf);
     }
-    int result = on_write_request_(session_name, remote_buffers);
+    int result = on_write_request_(session_name, buffers);
     return result;
 }
 
@@ -300,7 +298,7 @@ int SessionManager::handleReadRequest(const std::string& peer_name,
         return -1;
     }
 
-    // Parse JSON array of RemoteBuffer objects
+    // Parse JSON array of Buffer objects
     Json::CharReaderBuilder reader;
     Json::Value json_array;
     std::string errs;
@@ -315,19 +313,17 @@ int SessionManager::handleReadRequest(const std::string& peer_name,
         return -1;
     }
 
-    // Convert JSON array to vector<RemoteBuffer>
-    std::vector<RemoteBuffer> remote_buffers;
+    // Convert JSON array to vector<Buffer>
+    std::vector<Buffer> buffers;
     for (const auto& item : json_array) {
-        RemoteBuffer buf;
-        buf.remote_addr =
-            reinterpret_cast<void*>(std::stoull(item["addr"].asString()));
+        Buffer buf;
+        buf.addr = reinterpret_cast<void*>(std::stoull(item["addr"].asString()));
         buf.length = item["length"].asUInt64();
-        buf.rkey = item["rkey"].asUInt();
-        remote_buffers.push_back(buf);
+        buffers.push_back(buf);
     }
 
     // Pass session_name to callback instead of peer_name
-    return on_read_request_(session_name, remote_buffers);
+    return on_read_request_(session_name, buffers);
 }
 
 // Buffer info management for e2e testing

@@ -64,12 +64,12 @@ class RapidTransfer::Impl {
 
     TaskID write(const std::string& peer_name,
                  const std::vector<Buffer>& local_buffers,
-                 const std::vector<RemoteBuffer>& remote_buffers,
+                 const std::vector<Buffer>& remote_buffers,
                  const std::string& notify_message);
 
     TaskID read(const std::string& peer_name,
                 const std::vector<Buffer>& local_buffers,
-                const std::vector<RemoteBuffer>& remote_buffers,
+                const std::vector<Buffer>& remote_buffers,
                 const std::string& notify_message);
 
     // ========================================================================

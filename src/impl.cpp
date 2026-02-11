@@ -105,17 +105,8 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
         // peers
         ::rapid::SessionManager::OnWriteRequestCallback on_write_request =
             [this](const std::string& peer_name,
-                   const std::vector<RemoteBuffer>& remote_buffers) -> int {
-            // Remote peer wants us to receive data into remote_buffers
-            // Convert RemoteBuffer to Buffer (ignoring rkey for UD send/recv)
-            std::vector<Buffer> buffers;
-            for (const auto& rbuf : remote_buffers) {
-                Buffer buf;
-                buf.addr = rbuf.remote_addr;
-                buf.length = rbuf.length;
-                buffers.push_back(buf);
-            }
-
+                   const std::vector<Buffer>& buffers) -> int {
+            // Remote peer wants us to receive data into buffers
             // Get session name for this peer
             std::string session_name = peer_name;
             auto it = peer_to_session_map_.find(peer_name);
@@ -139,17 +130,8 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
         // peers
         ::rapid::SessionManager::OnReadRequestCallback on_read_request =
             [this](const std::string& peer_name,
-                   const std::vector<RemoteBuffer>& remote_buffers) -> int {
-            // Remote peer wants us to send data from remote_buffers
-            // Convert RemoteBuffer to Buffer (ignoring rkey for UD send/recv)
-            std::vector<Buffer> buffers;
-            for (const auto& rbuf : remote_buffers) {
-                Buffer buf;
-                buf.addr = rbuf.remote_addr;
-                buf.length = rbuf.length;
-                buffers.push_back(buf);
-            }
-
+                   const std::vector<Buffer>& buffers) -> int {
+            // Remote peer wants us to send data from buffers
             // Get session name for this peer
             std::string session_name = peer_name;
             auto it = peer_to_session_map_.find(peer_name);
@@ -319,12 +301,10 @@ int RapidTransfer::Impl::ensureConnection(const std::string& peer_name,
 // Write/Read Operations (using UD send/receive)
 // ============================================================================
 
-TaskID RapidTransfer::Impl::write(
-    const std::string& peer_name, const std::vector<Buffer>& local_buffers,
-    const std::vector<RemoteBuffer>& remote_buffers,
-    const std::string& notify_message) {
-    using namespace async_simple::coro;
-
+TaskID RapidTransfer::Impl::write(const std::string& peer_name,
+                                  const std::vector<Buffer>& local_buffers,
+                                  const std::vector<Buffer>& remote_buffers,
+                                  const std::string& notify_message) {
     if (local_buffers.empty()) {
         LOG(ERROR) << "[RapidTransfer] No buffers provided for write";
         return -1;
@@ -340,56 +320,14 @@ TaskID RapidTransfer::Impl::write(
     // 2. Get the session name for this peer
     std::string session_name = session_manager_->getSessionName(peer_name);
 
-    // 3. Serialize remote_buffers to JSON
-    Json::Value json_array(Json::arrayValue);
-    for (const auto& buf : remote_buffers) {
-        Json::Value item;
-        item["addr"] =
-            std::to_string(reinterpret_cast<uintptr_t>(buf.remote_addr));
-        item["length"] = Json::Value::UInt64(buf.length);
-        item["rkey"] = buf.rkey;
-        json_array.append(item);
-    }
-    Json::StreamWriterBuilder writer;
-    std::string buffers_json = Json::writeString(writer, json_array);
-
-    // 4. RPC call to notify remote peer to prepare receive
-    coro_rpc::coro_rpc_client* client =
-        session_manager_->getRPCClient(peer_name);
-    if (!client) {
-        LOG(ERROR) << "[RapidTransfer] No cached RPC client for peer: "
-                   << peer_name;
-        return -1;
-    }
-
-    auto rpc_result =
-        client->send_request<&::rapid::SessionManager::handleWriteRequest>(
-            peer_name, session_name, buffers_json);
-    std::optional<int> result =
-        syncAwait([&]() -> async_simple::coro::Lazy<std::optional<int>> {
-            auto r = co_await co_await rpc_result;
-            if (!r) {
-                LOG(ERROR) << "[RapidTransfer] Write RPC failed: "
-                           << r.error().msg;
-                co_return std::nullopt;
-            }
-            co_return r->result();
-        }());
-
-    if (!result || result.value() != 0) {
-        LOG(ERROR) << "[RapidTransfer] Remote peer failed to prepare receive";
-        return -1;
-    }
-
-    // 5. Call local send to transfer data
-    ret = ud_context_.send(session_name, local_buffers);
+    // 3. Send with remote write targets embedded in packet headers
+    ret = ud_context_.send(session_name, local_buffers, remote_buffers);
     if (ret < 0) {
-        LOG(ERROR) << "[RapidTransfer] Send failed after RPC";
-        session_manager_->disconnect(peer_name);
+        LOG(ERROR) << "[RapidTransfer] Send failed";
         return ret;
     }
 
-    // 6. Register notification if provided (will be sent in getStatus())
+    // 4. Register notification if provided (will be sent in getStatus())
     if (!notify_message.empty()) {
         std::lock_guard<std::mutex> lock(notifications_mutex_);
         pending_notifications_[ret] = {peer_name, notify_message, false};
@@ -400,10 +338,10 @@ TaskID RapidTransfer::Impl::write(
     return ret;
 }
 
-TaskID RapidTransfer::Impl::read(
-    const std::string& peer_name, const std::vector<Buffer>& local_buffers,
-    const std::vector<RemoteBuffer>& remote_buffers,
-    const std::string& notify_message) {
+TaskID RapidTransfer::Impl::read(const std::string& peer_name,
+                                 const std::vector<Buffer>& local_buffers,
+                                 const std::vector<Buffer>& remote_buffers,
+                                 const std::string& notify_message) {
     using namespace async_simple::coro;
 
     if (local_buffers.empty()) {
@@ -425,10 +363,8 @@ TaskID RapidTransfer::Impl::read(
     Json::Value json_array(Json::arrayValue);
     for (const auto& buf : remote_buffers) {
         Json::Value item;
-        item["addr"] =
-            std::to_string(reinterpret_cast<uintptr_t>(buf.remote_addr));
+        item["addr"] = std::to_string(reinterpret_cast<uintptr_t>(buf.addr));
         item["length"] = Json::Value::UInt64(buf.length);
-        item["rkey"] = buf.rkey;
         json_array.append(item);
     }
     Json::StreamWriterBuilder writer;

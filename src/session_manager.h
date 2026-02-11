@@ -33,16 +33,15 @@ class SessionManager {
     using OnErrorCallback = std::function<void(const std::string&)>;
 
     // Callback for handling write requests from remote peers
-    // Receives vector of RemoteBuffer descriptors and returns status (0 =
-    // success)
+    // Receives vector of Buffer descriptors and returns status (0 = success)
     using OnWriteRequestCallback =
         std::function<int(const std::string& peer_name,
-                          const std::vector<RemoteBuffer>& remote_buffers)>;
+                          const std::vector<Buffer>& buffers)>;
 
     // Callback for handling read requests from remote peers
     using OnReadRequestCallback =
         std::function<int(const std::string& peer_name,
-                          const std::vector<RemoteBuffer>& remote_buffers)>;
+                          const std::vector<Buffer>& buffers)>;
 
     SessionManager() {}
 

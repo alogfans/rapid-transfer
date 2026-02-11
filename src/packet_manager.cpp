@@ -3,6 +3,7 @@
 #include "packet_manager.h"
 
 #include <glog/logging.h>
+#include <linux/limits.h>
 #include <numa.h>
 
 #include <fstream>
@@ -150,10 +151,10 @@ int PacketHandle::encode() {
     handle.pkt_hdr_imm.raw = pkt_hdr.raw;
     if (!pkt_hdr.compacted) {
         PktHdr* hdr = (PktHdr*)handle.packet_buf;
-        // hdr->hdr_imm.raw = pkt_hdr.raw;
         hdr->wnd = htole16(handle.wnd);
         hdr->ts_lo = htole16(uint16_t(handle.ts & 0xffff));
         hdr->ts_hi = htole32(uint32_t((handle.ts >> 16) & 0xffffffff));
+        hdr->remote_addr = htole64(handle.remote_addr);
     }
     return 0;
 }
@@ -170,7 +171,7 @@ int PacketHandle::decode() {
             (PktHdr*)((char*)handle.packet_buf + (with_grh ? kGRHSize : 0));
         handle.wnd = le16toh(hdr->wnd);
         handle.ts = (uint64_t(le32toh(hdr->ts_hi)) << 16) | le16toh(hdr->ts_lo);
-        // pkt_hdr.raw = hdr->hdr_imm.raw;
+        handle.remote_addr = le64toh(hdr->remote_addr);
     }
     handle.session = pkt_hdr.session;
     handle.cmd = pkt_hdr.cmd;
@@ -280,6 +281,14 @@ int SendQueue::push(const std::vector<Buffer>& slice_list, uint32_t& last_sn) {
     return fillPrimaryQueue();
 }
 
+int SendQueue::push(const std::vector<Buffer>& slice_list, uint32_t& last_sn,
+                    const std::vector<Buffer>& remote_targets) {
+    // RWSpinlock::WriteGuard guard(queue_lock_);
+    auto fragment_id = secondary_queue_.push(slice_list, remote_targets);
+    last_sn = SHORT_SN(fragment_id.second);
+    return fillPrimaryQueue();
+}
+
 int SendQueue::markCompleted(uint32_t ack_sn) {
     // RWSpinlock::WriteGuard guard(queue_lock_);
     // case 1: XXX tail_ ... ack_sn ... head_ XXX
@@ -295,7 +304,6 @@ int SendQueue::markCompleted(uint32_t ack_sn) {
 }
 
 int SendQueue::fillPrimaryQueue() {
-    // including wrap-ups
     while (secondary_queue_.hasRemainingFragment() &&
            head_ - tail_ <= wnd_size_) {
         auto& handle = handle_[head_ % queue_capacity_];
@@ -306,7 +314,8 @@ int SendQueue::fillPrimaryQueue() {
         handle.wnd = wnd_size_;
         handle.sn = SHORT_SN(head_);
         handle.ts = 0;
-        if (handle.setPayload(slice.addr, slice.length, false)) return -1;
+        handle.remote_addr = reinterpret_cast<uint64_t>(slice.remote_addr);
+        if (handle.setPayload(slice.local_addr, slice.length, false)) return -1;
         handle.inflight = true;
         head_++;
     }
@@ -399,7 +408,8 @@ int McastSendQueue::fillPrimaryQueue() {
         handle.wnd = wnd_size_;
         handle.sn = SHORT_SN(head_);
         handle.ts = 0;
-        if (handle.setPayload(slice.addr, slice.length, false)) return -1;
+        handle.remote_addr = reinterpret_cast<uint64_t>(slice.remote_addr);
+        if (handle.setPayload(slice.local_addr, slice.length, false)) return -1;
         handle.inflight = true;
         head_++;
     }
@@ -486,7 +496,7 @@ int ReceiveQueue::fillPrimaryQueue() {
            head_ - tail_ <= wnd_size_) {
         auto slice = secondary_queue_.popFragment();
         auto& request = requests_[head_ % queue_capacity_];
-        request.addr = slice.addr;
+        request.addr = slice.local_addr;
         request.length = slice.length;
         request.inflight = true;
         head_++;

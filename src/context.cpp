@@ -18,7 +18,7 @@ Context::Context(size_t mtu_size, size_t max_packets, size_t queue_capacity)
 
 Context::~Context() {}
 
-int Context::construct(const std::string &device_name, uint8_t rdma_port,
+int Context::construct(const std::string& device_name, uint8_t rdma_port,
                        int gid_index) {
     int ret = 0;
     ret = controller_.construct(device_name, rdma_port, gid_index);
@@ -26,8 +26,8 @@ int Context::construct(const std::string &device_name, uint8_t rdma_port,
     ret = packet_manager_.construct(device_name);
     if (ret < 0) return ret;
 
-    auto &pool = packet_manager_.getPool();
-    void *arena_base = pool.getArena();
+    auto& pool = packet_manager_.getPool();
+    void* arena_base = pool.getArena();
     size_t arena_capacity = pool.getCapacity();
     ret = controller_.context().registerMemoryRegion(arena_base, arena_capacity,
                                                      IBV_ACCESS_LOCAL_WRITE);
@@ -89,62 +89,65 @@ int Context::runStep() {
     return 0;
 }
 
-TaskID Context::send(const std::string &peer_name,
-                     const std::vector<Buffer> &buffer_list) {
+TaskID Context::send(const std::string& peer_name,
+                     const std::vector<Buffer>& local_buffers,
+                     const std::vector<Buffer>& remote_buffers) {
     int session = controller_.findSession(peer_name, 0);
     if (session < 0) {
         LOG(ERROR) << "cannot assign session id";
         return -1;
     }
     RWSpinlock::WriteGuard guard(active_session_lock_);
-    if (!active_session_map_.count(session)) {
-        int ret = packet_manager_.getPool().allocatePacket(
-            active_session_map_[session].ack_handle);
-        if (ret) return ret;
-        active_session_map_[session].setup(packet_manager_, session);
-    }
+    int ret = ensureSessionInitialized(session);
+    if (ret) return ret;
     uint32_t last_sn = 0;
-    auto &queue = *active_session_map_[session].send_queue;
-    int ret = queue.push(buffer_list, last_sn);
+    auto& queue = *active_session_map_[session].send_queue;
+    ret = queue.push(local_buffers, last_sn, remote_buffers);
     if (ret) return ret;
     int task_id = next_task_id_.fetch_add(1, std::memory_order_relaxed);
     task_map_[task_id] = Task{session, last_sn, true, &queue};
     return task_id;
 }
 
-TaskID Context::receive(const std::string &peer_name,
-                        const std::vector<Buffer> &buffer_list) {
-    int session = controller_.findSession(peer_name, 0);
-    if (session < 0) {
-        LOG(ERROR) << "cannot assign session id";
-        return -1;
-    }
-    RWSpinlock::WriteGuard guard(active_session_lock_);
+int Context::ensureSessionInitialized(int session) {
     if (!active_session_map_.count(session)) {
         int ret = packet_manager_.getPool().allocatePacket(
             active_session_map_[session].ack_handle);
         if (ret) return ret;
         active_session_map_[session].setup(packet_manager_, session);
     }
+    return 0;
+}
+
+TaskID Context::receive(const std::string& peer_name,
+                        const std::vector<Buffer>& buffer_list) {
+    int session = controller_.findSession(peer_name, 0);
+    if (session < 0) {
+        LOG(ERROR) << "cannot assign session id";
+        return -1;
+    }
+    RWSpinlock::WriteGuard guard(active_session_lock_);
+    int ret = ensureSessionInitialized(session);
+    if (ret) return ret;
     uint32_t last_sn = 0;
-    auto &queue = *active_session_map_[session].receive_queue;
-    int ret = queue.push(buffer_list, last_sn);
+    auto& queue = *active_session_map_[session].receive_queue;
+    ret = queue.push(buffer_list, last_sn);
     if (ret) return ret;
     int task_id = next_task_id_.fetch_add(1);
     task_map_[task_id] = Task{session, last_sn, false, &queue};
     return task_id;
 }
 
-Status Context::getStatus(TaskID task_id, size_t *transferred_bytes) {
+Status Context::getStatus(TaskID task_id, size_t* transferred_bytes) {
     if (!task_map_.count(task_id)) return Status::UNKNOWN;
-    auto &task = task_map_[task_id];
+    auto& task = task_map_[task_id];
     uint32_t ack_sn, next_sn;
     if (task.is_send) {
-        auto &queue = *(SendQueue *)task.queue;
+        auto& queue = *(SendQueue*)task.queue;
         ack_sn = queue.getAckSN();
         next_sn = queue.getNextSN();
     } else {
-        auto &queue = *(ReceiveQueue *)task.queue;
+        auto& queue = *(ReceiveQueue*)task.queue;
         ack_sn = queue.getAckSN();
         next_sn = queue.getNextSN();
     }
@@ -162,29 +165,29 @@ int Context::freeTask(TaskID task_id) {
     return 0;
 }
 
-int Context::prepareConnection(const std::string &peer_addr,
-                               Attributes &local) {
+int Context::prepareConnection(const std::string& peer_addr,
+                               Attributes& local) {
     return controller_.prepareConnection(peer_addr, local);
 }
 
-int Context::setupConnection(const std::string &peer_addr,
-                             const Attributes &peer) {
+int Context::setupConnection(const std::string& peer_addr,
+                             const Attributes& peer) {
     return controller_.setupConnection(peer_addr, peer);
 }
 
-int Context::registerLocalMemory(void *addr, size_t length) {
+int Context::registerLocalMemory(void* addr, size_t length) {
     return controller_.context().registerMemoryRegion(addr, length,
                                                       IBV_ACCESS_LOCAL_WRITE);
 }
 
-int Context::unregisterLocalMemory(void *addr) {
+int Context::unregisterLocalMemory(void* addr) {
     return controller_.context().unregisterMemoryRegion(addr);
 }
 
-int Context::submitNormalRecvWR(PacketHandle &handle) {
-    auto &endpoint_store = controller_.endpointStore();
+int Context::submitNormalRecvWR(PacketHandle& handle) {
+    auto& endpoint_store = controller_.endpointStore();
     int index = recv_handles_qp_index_map_[handle.getRawPacket()];
-    Request *request = request_cache_.allocate();
+    Request* request = request_cache_.allocate();
     new (request) Request{.addr = {handle.getRawPacket()},
                           .length = {packet_manager_.mtuSize()},
                           .lkey = {local_arena_lkey_}};
@@ -201,7 +204,7 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
     }
 
     for (int i = 0; i < nr_poll; ++i) {
-        auto request = (Request *)wc[i].wr_id;
+        auto request = (Request*)wc[i].wr_id;
         __sync_fetch_and_sub(request->qp_depth, 1);
         if (wc[i].status != IBV_WC_SUCCESS) {
             LOG(ERROR) << "worker: process failed for slice (addr: "
@@ -231,21 +234,21 @@ thread_local uint64_t tl_total = 0;
 
 int Context::sendDataPackets(uint64_t current_ts) {
     const static size_t kRequestBatchSize = 4;
-    auto &context = controller_.context();
+    auto& context = controller_.context();
     Buffer slices[2];
     RWSpinlock::ReadGuard guard(active_session_lock_);
     for (auto session : active_session_map_) {
         if (current_ts - session.second.last_send_ts < recv_rto_ * 2 / 3)
             continue;
-        std::vector<Request *> request_list;
+        std::vector<Request*> request_list;
         std::shared_ptr<RdmaUDEndPoint> endpoint;
         uint64_t head, tail;
-        auto &send_queue = *session.second.send_queue;
+        auto& send_queue = *session.second.send_queue;
         send_queue.getIndexRange(head, tail);
         head = std::min(head, tail + session.second.cwnd);
         bool skip_remaining = false;
         for (auto curr = tail; !skip_remaining && curr < head; curr++) {
-            auto &handle = send_queue.getMutableEntry(curr);
+            auto& handle = send_queue.getMutableEntry(curr);
             if (current_ts - handle.ts < recv_rto_) {
                 skip_remaining = true;
                 continue;
@@ -265,7 +268,7 @@ int Context::sendDataPackets(uint64_t current_ts) {
             session.second.last_send_ts = current_ts;
             uint32_t imm_data;
             if (handle.serialize(slices, imm_data)) return -1;
-            Request *request = request_cache_.allocate();
+            Request* request = request_cache_.allocate();
             new (request) Request{
                 .addr = {slices[0].addr, slices[1].addr},
                 .length = {slices[0].length, slices[1].length},
@@ -304,24 +307,40 @@ int Context::sendDataPackets(uint64_t current_ts) {
 int Context::sendAckPackets(uint64_t current_ts) {
     Buffer slices[2];
     RWSpinlock::ReadGuard guard(active_session_lock_);
-    for (auto &session : active_session_map_) {
-        auto &queue = *session.second.receive_queue;
-        PacketHandle &handle = session.second.ack_handle;
+    for (auto& session : active_session_map_) {
+        PacketHandle& handle = session.second.ack_handle;
         uint64_t recv_packets = session.second.recv_packets;
         if (session.second.ack_packets >= recv_packets || handle.inflight)
             continue;
         handle.session = uint8_t(session.first % 256);
         handle.cmd = PKT_CMD_ACK;
-        uint64_t head, tail;
         const static uint64_t kMinWindowSize = 8;
-        queue.getIndexRange(head, tail);
-        handle.wnd = std::max(head - tail, kMinWindowSize);
-        handle.sn = queue.getAckSN();
-        handle.ts = queue.getLastTS();
+
+        // Determine which queue to use for ACK generation
+        // Use direct_write_queue if active (has received direct write packets)
+        // Otherwise use receive_queue (normal mode with pre-posted buffers)
+        uint64_t head, tail;
+        uint64_t dw_head, dw_tail;
+        session.second.receive_queue->getIndexRange(head, tail);
+        session.second.direct_write_queue.getIndexRange(dw_head, dw_tail);
+
+        // Use direct write queue if it has received packets (tail > 0)
+        bool use_direct_write = (dw_tail > 0);
+
+        if (use_direct_write) {
+            handle.sn = session.second.direct_write_queue.getAckSN();
+            handle.ts = session.second.direct_write_queue.getLastTS();
+            handle.wnd = std::max(dw_head - dw_tail, kMinWindowSize);
+        } else {
+            handle.sn = session.second.receive_queue->getAckSN();
+            handle.ts = session.second.receive_queue->getLastTS();
+            handle.wnd = std::max(head - tail, kMinWindowSize);
+        }
+
         handle.inflight = true;
         uint32_t imm_data;
         if (handle.serialize(slices, imm_data)) return -1;
-        Request *request = request_cache_.allocate();
+        Request* request = request_cache_.allocate();
         new (request) Request{.addr = {slices[0].addr},
                               .length = {slices[0].length},
                               .lkey = {local_arena_lkey_},
@@ -338,10 +357,10 @@ int Context::sendAckPackets(uint64_t current_ts) {
     return 0;
 }
 
-int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
-    Request *request = (Request *)wc.wr_id;
+int Context::processReceivedPacket(uint64_t current_ts, ibv_wc& wc) {
+    Request* request = (Request*)wc.wr_id;
     if (wc.opcode == IBV_WC_SEND) {
-        auto handle = (PacketHandle *)request->context;
+        auto handle = (PacketHandle*)request->context;
         if (handle && handle->cmd == PKT_CMD_ACK) handle->inflight = false;
         return 0;
     }
@@ -349,26 +368,49 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc &wc) {
         uint32_t imm_data = wc.imm_data;
         if (!(wc.wc_flags & IBV_WC_WITH_IMM)) imm_data = 0;
         PacketHandle handle;
-        int ret = handle.setRawPacket((char *)request->addr[0], true);
+        int ret = handle.setRawPacket((char*)request->addr[0], true);
         if (ret) return ret;
         ret = handle.deserialize(imm_data, wc.byte_len);
         if (ret) return ret;
-        ibv_grh *grh = (ibv_grh *)request->addr[0];
+        ibv_grh* grh = (ibv_grh*)request->addr[0];
         int session =
             controller_.findSession(grh->sgid, wc.src_qp, handle.session);
         if (session >= 0) {
+            // Ensure session entry is initialized (on-demand initialization)
+            // This is needed for direct write mode where receiver doesn't call
+            // receive()
+            if (!active_session_map_.count(session)) {
+                RWSpinlock::WriteGuard write_guard(active_session_lock_);
+                int ret = ensureSessionInitialized(session);
+                if (ret) {
+                    LOG(ERROR) << "Failed to initialize session " << session;
+                    submitNormalRecvWR(handle);
+                    return ret;
+                }
+            }
+
             RWSpinlock::ReadGuard guard(active_session_lock_);
-            assert(active_session_map_.count(session));
             switch (handle.cmd) {
                 case PKT_CMD_DATA: {
-                    auto &session_entry = active_session_map_[session];
-                    session_entry.receive_queue->markCompleted(handle);
-                    stats_.recv_packets.fetch_add(1, std::memory_order_relaxed);
-                    session_entry.recv_packets++;
+                    auto& session_entry = active_session_map_[session];
+                    // Check if this packet has remote write target (direct write mode)
+                    if (handle.remote_addr != 0) {
+                        // Direct write mode: use DirectWriteQueue (handles memcpy internally)
+                        session_entry.direct_write_queue.markCompleted(handle);
+                        stats_.recv_packets.fetch_add(
+                            1, std::memory_order_relaxed);
+                        session_entry.recv_packets++;
+                    } else {
+                        // Normal mode: use ReceiveQueue
+                        session_entry.receive_queue->markCompleted(handle);
+                        stats_.recv_packets.fetch_add(
+                            1, std::memory_order_relaxed);
+                        session_entry.recv_packets++;
+                    }
                     break;
                 }
                 case PKT_CMD_ACK: {
-                    auto &session_entry = active_session_map_[session];
+                    auto& session_entry = active_session_map_[session];
                     session_entry.send_queue->markCompleted(handle.sn);
                     auto rtt = (current_ts - handle.ts) & ((1ull << 48) - 1);
                     updateRTO(rtt);
@@ -402,9 +444,9 @@ void Context::updateRTO(uint64_t rtt) {
 }
 
 void Context::updateWndOnSuccess(int session, uint32_t rwnd,
-                                 SendQueue &send_queue) {
+                                 SendQueue& send_queue) {
     // Note: Caller must hold active_session_lock_ (ReadGuard or WriteGuard)
-    auto &entry = active_session_map_[session];
+    auto& entry = active_session_map_[session];
     if (entry.cwnd < entry.ssthresh) {
         entry.cwnd++;
         entry.incr += mtu_size_;

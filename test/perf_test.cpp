@@ -24,7 +24,6 @@
 
 using namespace rapid::v1;
 using rapid::Buffer;
-using rapid::RemoteBuffer;
 using rapid::Status;
 using rapid::TaskID;
 
@@ -193,9 +192,9 @@ void runPerfSender(const std::string& peer_address,
     std::vector<Buffer> local_buffers;
     local_buffers.push_back({send_buffer, test_size});
 
-    std::vector<RemoteBuffer> remote_buffers;
+    std::vector<Buffer> remote_buffers;
     remote_buffers.push_back({reinterpret_cast<void*>(recv_buffer_info.addr),
-                              recv_buffer_info.length, recv_buffer_info.rkey});
+                              recv_buffer_info.length});
 
     std::vector<double> latencies_ms;
     int timeouts = 0;

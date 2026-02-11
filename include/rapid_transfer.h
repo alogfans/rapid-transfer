@@ -34,13 +34,6 @@ struct Buffer {
     size_t length;  // Buffer size in bytes
 };
 
-/// Remote buffer descriptor for RDMA Write/Read operations
-struct RemoteBuffer {
-    void* remote_addr;  // Peer's virtual address
-    size_t length;      // Buffer size
-    uint32_t rkey;      // Peer's remote key
-};
-
 /// Transfer status enumeration
 enum Status { UNKNOWN, PENDING, SUCCESS, FAILED };
 
@@ -129,7 +122,7 @@ class RapidTransfer {
     /// notify_message: optional message to send to remote peer
     TaskID write(const std::string& peer_name,
                  const std::vector<Buffer>& local_buffers,
-                 const std::vector<RemoteBuffer>& remote_buffers,
+                 const std::vector<Buffer>& remote_buffers,
                  const std::string& notify_message = "");
 
     // ========================================================================
@@ -140,7 +133,7 @@ class RapidTransfer {
     /// notify_message: optional message to send to remote peer
     TaskID read(const std::string& peer_name,
                 const std::vector<Buffer>& local_buffers,
-                const std::vector<RemoteBuffer>& remote_buffers,
+                const std::vector<Buffer>& remote_buffers,
                 const std::string& notify_message = "");
 
     // ========================================================================

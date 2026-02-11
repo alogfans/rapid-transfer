@@ -19,7 +19,6 @@
 
 using namespace rapid::v1;
 using rapid::Buffer;
-using rapid::RemoteBuffer;
 using rapid::Status;
 using rapid::TaskID;
 
@@ -78,9 +77,9 @@ void runSender(const std::string& peer_address,
               << ", size=" << recv_buffer_info.length << "\n";
 
     // Prepare remote_buffers with actual receiver buffer address
-    std::vector<RemoteBuffer> remote_buffers;
+    std::vector<Buffer> remote_buffers;
     remote_buffers.push_back({reinterpret_cast<void*>(recv_buffer_info.addr),
-                              recv_buffer_info.length, recv_buffer_info.rkey});
+                              recv_buffer_info.length});
 
     std::cout << "[Sender] Initiating write to " << peer_address << "\n";
 

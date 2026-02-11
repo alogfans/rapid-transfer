@@ -36,7 +36,7 @@ RapidTransfer::~RapidTransfer() = default;
 
 TaskID RapidTransfer::write(const std::string& peer_name,
                             const std::vector<Buffer>& local_buffers,
-                            const std::vector<RemoteBuffer>& remote_buffers,
+                            const std::vector<Buffer>& remote_buffers,
                             const std::string& notify_message) {
     return impl_->write(peer_name, local_buffers, remote_buffers,
                         notify_message);
@@ -44,7 +44,7 @@ TaskID RapidTransfer::write(const std::string& peer_name,
 
 TaskID RapidTransfer::read(const std::string& peer_name,
                            const std::vector<Buffer>& local_buffers,
-                           const std::vector<RemoteBuffer>& remote_buffers,
+                           const std::vector<Buffer>& remote_buffers,
                            const std::string& notify_message) {
     return impl_->read(peer_name, local_buffers, remote_buffers,
                        notify_message);

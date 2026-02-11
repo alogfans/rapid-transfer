@@ -26,7 +26,8 @@ class Context {
     int deconstruct();
 
     TaskID send(const std::string& peer_name,
-                const std::vector<Buffer>& buffer_list);
+                const std::vector<Buffer>& local_buffers,
+                const std::vector<Buffer>& remote_buffers = {});
 
     TaskID receive(const std::string& peer_name,
                    const std::vector<Buffer>& buffer_list);
@@ -61,6 +62,8 @@ class Context {
     int processReceivedPacket(uint64_t current_ts, ibv_wc& wc);
 
     int submitNormalRecvWR(PacketHandle& handle);
+
+    int ensureSessionInitialized(int session);
 
    private:
     struct Task {
@@ -117,6 +120,7 @@ class Context {
         ReceiveQueue* receive_queue;
         McastSendQueue* mcast_send_queue;
         uint64_t last_send_ts;
+        DirectWriteQueue direct_write_queue;
     };
     std::unordered_map<int, SessionInfo> active_session_map_;
     RWSpinlock active_session_lock_;
