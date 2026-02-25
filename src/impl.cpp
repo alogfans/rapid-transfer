@@ -7,14 +7,10 @@
 
 #include "impl.h"
 
-#include <async_simple/coro/Lazy.h>
-#include <async_simple/coro/SyncAwait.h>
 #include <glog/logging.h>
 #include <json/json.h>
 
-#include <ylt/coro_rpc/coro_rpc_client.hpp>
-
-#include "session_manager.h"
+#include "ud_control_manager.h"
 
 namespace rapid {
 namespace v1 {
@@ -29,19 +25,17 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
     listen_address_ = listen_address;
     start_time_ = std::chrono::steady_clock::now();
 
-    // Create Session Manager for automatic connection establishment
-    session_manager_ = new ::rapid::SessionManager();
-
-    // Construct UD Context
+    // Construct UD Context first (UDControlManager needs it)
     int ret = ud_context_.construct(
         rail_config.device_name, rail_config.rdma_port, rail_config.gid_index);
     if (ret) {
         LOG(ERROR) << "[RapidTransfer] Failed to construct UD context";
         rail_state_ = RailState::FAILED;
-        delete session_manager_;
-        session_manager_ = nullptr;
         return ret;
     }
+
+    // Create UD Control Manager (replaces Session Manager)
+    ud_control_manager_ = new ::rapid::UDControlManager(ud_context_);
 
     rail_state_ = RailState::ACTIVE;
 
@@ -49,7 +43,7 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
     if (!listen_address.empty()) {
         // Set up accept callback - this prepares and sets up the RDMA
         // connection
-        ::rapid::SessionManager::OnAcceptCallback on_accept =
+        ::rapid::UDControlManager::OnAcceptCallback on_accept =
             [this](const std::string& peer_name, const Attributes& request,
                    Attributes& response) -> int {
             // Prepare local connection attributes
@@ -68,9 +62,9 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
                 return -1;
             }
 
-            // Get the session name assigned by the server
+            // Get the session name assigned by the control manager
             std::string session_name =
-                session_manager_->getSessionName(peer_name);
+                ud_control_manager_->getSessionName(peer_name);
 
             // Also register the session name with UD Context
             Attributes session_request, session_response;
@@ -95,7 +89,7 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
         };
 
         // Set up error callback
-        ::rapid::SessionManager::OnErrorCallback on_error =
+        ::rapid::UDControlManager::OnErrorCallback on_error =
             [](const std::string& peer_name) {
                 LOG(ERROR) << "[RapidTransfer] Connection error with: "
                            << peer_name;
@@ -103,7 +97,7 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
 
         // Set up read request callback - handles incoming read requests from
         // peers
-        ::rapid::SessionManager::OnReadRequestCallback on_read_request =
+        ::rapid::UDControlManager::OnReadRequestCallback on_read_request =
             [this](const std::string& peer_name,
                    const std::vector<Buffer>& local_targets,
                    const std::vector<Buffer>& data_sources) -> int {
@@ -129,11 +123,11 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
         };
 
         // Register the read callback
-        session_manager_->setReadCallback(on_read_request);
+        ud_control_manager_->setReadCallback(on_read_request);
 
         // Set up notification callback - handles incoming notifications from
         // peers
-        ::rapid::SessionManager::OnNotificationCallback on_notification =
+        ::rapid::UDControlManager::OnNotificationCallback on_notification =
             [this](const std::string& peer_name, int task_id,
                    const std::string& message) {
                 std::lock_guard<std::mutex> lock(notification_mutex_);
@@ -141,14 +135,14 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
                     user_notification_callback_(peer_name, task_id, message);
                 }
             };
-        session_manager_->setNotificationCallback(on_notification);
+        ud_control_manager_->setNotificationCallback(on_notification);
 
-        ret = session_manager_->startListener(listen_address, on_accept,
+        ret = ud_control_manager_->startListener(listen_address, on_accept,
                                               on_error);
         if (ret) {
             LOG(ERROR) << "[RapidTransfer] Failed to start listener";
-            delete session_manager_;
-            session_manager_ = nullptr;
+            delete ud_control_manager_;
+            ud_control_manager_ = nullptr;
             ud_context_.deconstruct();
             rail_state_ = RailState::FAILED;
             return ret;
@@ -164,16 +158,16 @@ int RapidTransfer::Impl::shutdown() {
     stopProgressThread();
 
     // Stop listener if running
-    if (session_manager_) {
-        session_manager_->shutdownListener();
+    if (ud_control_manager_) {
+        ud_control_manager_->shutdownListener();
     }
 
     ud_context_.deconstruct();
 
-    // Cleanup SessionManager
-    if (session_manager_) {
-        delete session_manager_;
-        session_manager_ = nullptr;
+    // Cleanup UDControlManager
+    if (ud_control_manager_) {
+        delete ud_control_manager_;
+        ud_control_manager_ = nullptr;
     }
 
     rail_state_ = RailState::DISABLED;
@@ -205,12 +199,12 @@ int RapidTransfer::Impl::setupConnection(const std::string& peer_name,
 }
 
 int RapidTransfer::Impl::makeConnectionIfNeeded(const std::string& peer_name) {
-    if (!session_manager_) {
-        LOG(ERROR) << "[RapidTransfer] No SessionManager available";
+    if (!ud_control_manager_) {
+        LOG(ERROR) << "[RapidTransfer] No UDControlManager available";
         return -1;
     }
 
-    if (session_manager_->hasConnection(peer_name)) {
+    if (ud_control_manager_->hasConnection(peer_name)) {
         return 0;
     }
 
@@ -222,11 +216,11 @@ int RapidTransfer::Impl::makeConnectionIfNeeded(const std::string& peer_name) {
         return ret;
     }
 
-    // Use SessionManager to establish connection (RPC handshake)
-    ret = session_manager_->connect(peer_name, request, response);
+    // Use UDControlManager to establish connection (TCP bootstrap + UD)
+    ret = ud_control_manager_->connect(peer_name, request, response);
     if (ret) {
         LOG(ERROR) << "[RapidTransfer] Failed to establish connection "
-                      "via SessionManager";
+                      "via UDControlManager";
         return ret;
     }
 
@@ -234,11 +228,11 @@ int RapidTransfer::Impl::makeConnectionIfNeeded(const std::string& peer_name) {
     ret = ud_context_.setupConnection(peer_name, response);
     if (ret) {
         LOG(ERROR) << "[RapidTransfer] Failed to setup connection";
-        session_manager_->disconnect(peer_name);
+        ud_control_manager_->disconnect(peer_name);
         return ret;
     }
 
-    std::string session_name = session_manager_->getSessionName(peer_name);
+    std::string session_name = ud_control_manager_->getSessionName(peer_name);
     Attributes session_request, session_response;
     ret = ud_context_.prepareConnection(session_name, session_request);
     if (ret) {
@@ -294,7 +288,7 @@ TaskID RapidTransfer::Impl::write(const std::string& peer_name,
     }
 
     // 2. Get the session name for this peer
-    std::string session_name = session_manager_->getSessionName(peer_name);
+    std::string session_name = ud_control_manager_->getSessionName(peer_name);
 
     // 3. Send with remote write targets embedded in packet headers
     ret = ud_context_.send(session_name, local_buffers, remote_buffers);
@@ -318,8 +312,6 @@ TaskID RapidTransfer::Impl::read(const std::string& peer_name,
                                  const std::vector<Buffer>& local_buffers,
                                  const std::vector<Buffer>& remote_buffers,
                                  const std::string& notify_message) {
-    using namespace async_simple::coro;
-
     if (local_buffers.empty()) {
         LOG(ERROR) << "[RapidTransfer] No buffers provided for read";
         return -1;
@@ -333,7 +325,7 @@ TaskID RapidTransfer::Impl::read(const std::string& peer_name,
     }
 
     // 2. Get the session name for this peer
-    std::string session_name = session_manager_->getSessionName(peer_name);
+    std::string session_name = ud_control_manager_->getSessionName(peer_name);
 
     // 3. Serialize buffers to JSON
     // local_buffers = where to put received data (becomes remote_targets for
@@ -358,35 +350,14 @@ TaskID RapidTransfer::Impl::read(const std::string& peer_name,
     Json::StreamWriterBuilder writer;
     std::string buffers_json = Json::writeString(writer, json_root);
 
-    // 4. RPC call to notify remote peer to send data to our buffers
-    coro_rpc::coro_rpc_client* client =
-        session_manager_->getRPCClient(peer_name);
-    if (!client) {
-        LOG(ERROR) << "[RapidTransfer] No cached RPC client for peer: "
-                   << peer_name;
-        return -1;
-    }
-
-    auto rpc_result =
-        client->send_request<&::rapid::SessionManager::handleReadRequest>(
-            peer_name, session_name, buffers_json);
-    std::optional<int> result =
-        syncAwait([&]() -> async_simple::coro::Lazy<std::optional<int>> {
-            auto r = co_await co_await rpc_result;
-            if (!r) {
-                LOG(ERROR) << "[RapidTransfer] Read RPC failed: "
-                           << r.error().msg;
-                co_return std::nullopt;
-            }
-            co_return r->result();
-        }());
-
-    if (!result || result.value() < 0) {
+    // 4. UD control message to notify remote peer to send data to our buffers
+    int task_id = 0;
+    ret = ud_control_manager_->sendReadRequest(peer_name, session_name,
+                                               buffers_json, task_id);
+    if (ret < 0 || task_id < 0) {
         LOG(ERROR) << "[RapidTransfer] Remote peer failed to send data";
         return -1;
     }
-
-    TaskID task_id = result.value();
 
     // 5. Register notification if provided (will be sent in getStatus())
     if (!notify_message.empty()) {
@@ -545,34 +516,9 @@ void RapidTransfer::Impl::setNotificationCallback(
 
 int RapidTransfer::Impl::notify(const std::string& peer_name, TaskID task_id,
                                 const std::string& message) {
-    using namespace async_simple::coro;
-
-    // Get cached RPC client
-    coro_rpc::coro_rpc_client* client =
-        session_manager_->getRPCClient(peer_name);
-    if (!client) {
-        LOG(ERROR) << "[RapidTransfer] No cached RPC client for peer: "
-                   << peer_name;
-        return -1;
-    }
-
-    // RPC call to send notification message to remote peer
-    auto rpc_result =
-        client->send_request<&::rapid::SessionManager::handleNotification>(
-            peer_name, task_id, message);
-
-    std::optional<int> result =
-        syncAwait([&]() -> async_simple::coro::Lazy<std::optional<int>> {
-            auto r = co_await co_await rpc_result;
-            if (!r) {
-                LOG(ERROR) << "[RapidTransfer] Notification RPC failed: "
-                           << r.error().msg;
-                co_return std::nullopt;
-            }
-            co_return r->result();
-        }());
-
-    if (!result || result.value() != 0) {
+    // Use UDControlManager to send notification via UD control message
+    int ret = ud_control_manager_->sendNotification(peer_name, task_id, message);
+    if (ret < 0) {
         LOG(ERROR) << "[RapidTransfer] Failed to send notification to peer";
         return -1;
     }
@@ -621,21 +567,19 @@ int RapidTransfer::Impl::unregisterLocalMemory(void* addr) {
 // ============================================================================
 
 void RapidTransfer::Impl::setBufferInfo(const RapidTransfer::BufferInfo& info) {
-    if (session_manager_) {
-        session_manager_->setBufferInfo(
+    if (ud_control_manager_) {
+        ud_control_manager_->setBufferInfo(
             ::rapid::BufferInfo{info.addr, info.length, info.rkey});
     } else {
-        LOG(WARNING) << "[RapidTransfer] No SessionManager available, cannot "
+        LOG(WARNING) << "[RapidTransfer] No UDControlManager available, cannot "
                         "set buffer info";
     }
 }
 
 std::optional<RapidTransfer::BufferInfo>
 RapidTransfer::Impl::getRemoteBufferInfo(const std::string& peer_address) {
-    using namespace async_simple::coro;
-
-    if (!session_manager_) {
-        LOG(ERROR) << "[RapidTransfer] No SessionManager available";
+    if (!ud_control_manager_) {
+        LOG(ERROR) << "[RapidTransfer] No UDControlManager available";
         return std::nullopt;
     }
 
@@ -646,28 +590,9 @@ RapidTransfer::Impl::getRemoteBufferInfo(const std::string& peer_address) {
         return std::nullopt;
     }
 
-    // Get RPC client
-    coro_rpc::coro_rpc_client* client =
-        session_manager_->getRPCClient(peer_address);
-    if (!client) {
-        LOG(ERROR) << "[RapidTransfer] No RPC client for peer: "
-                   << peer_address;
-        return std::nullopt;
-    }
-
-    // Call RPC to get buffer info
-    auto rpc_result =
-        client->send_request<&::rapid::SessionManager::getBufferInfo>();
-    std::optional<::rapid::BufferInfo> result = syncAwait(
-        [&]() -> async_simple::coro::Lazy<std::optional<::rapid::BufferInfo>> {
-            auto r = co_await co_await rpc_result;
-            if (!r) {
-                LOG(ERROR) << "[RapidTransfer] GetBufferInfo RPC failed: "
-                           << r.error().msg;
-                co_return std::nullopt;
-            }
-            co_return r->result();
-        }());
+    // Use UDControlManager to get buffer info via UD control message
+    std::optional<::rapid::BufferInfo> result =
+        ud_control_manager_->getBufferInfo(peer_address);
 
     if (!result) {
         return std::nullopt;

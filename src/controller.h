@@ -13,7 +13,6 @@
 #include "protocols/common/rdma_context.h"
 #include "protocols/common/rdma_multicast.h"
 #include "protocols/common/rdma_ud_endpoint_store.h"
-#include "session_manager.h"
 
 namespace rapid {
 

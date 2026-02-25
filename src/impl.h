@@ -21,7 +21,7 @@
 
 // Forward declaration
 namespace rapid {
-class SessionManager;
+class UDControlManager;
 }
 
 namespace rapid {
@@ -128,8 +128,8 @@ class RapidTransfer::Impl {
     // UD Context (direct use of existing UD implementation)
     Context ud_context_;
 
-    // Session Manager for automatic connection establishment
-    ::rapid::SessionManager* session_manager_{nullptr};
+    // UD Control Manager for control plane (replaces SessionManager)
+    ::rapid::UDControlManager* ud_control_manager_{nullptr};
 
     // Map from peer address to session name (e.g., "localhost:12348" ->
     // "server/0")

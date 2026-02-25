@@ -3,6 +3,7 @@
 #include "controller.h"
 
 #include <arpa/inet.h>
+#include <cassert>
 #include <glog/logging.h>
 #include <net/if.h>
 #include <stdio.h>

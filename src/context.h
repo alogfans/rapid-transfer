@@ -11,11 +11,14 @@
 #include "controller.h"
 #include "packet_manager.h"
 #include "rapid_transfer.h"
-#include "session_manager.h"
 
 namespace rapid {
 class Context {
    public:
+    // Control packet handler callback type
+    using ControlPacketHandler = std::function<int(const std::string& peer_name,
+                                                    const uint8_t* data, size_t length)>;
+
     Context(size_t mtu_size, size_t max_packets, size_t queue_capacity);
 
     ~Context();
@@ -45,6 +48,15 @@ class Context {
 
     size_t mtuSize() const { return mtu_size_; }
 
+    // Send control message to peer
+    int sendControl(const std::string& peer_name,
+                   const std::vector<uint8_t>& message);
+
+    // Set control packet handler (public for UDControlManager)
+    void setControlPacketHandler(ControlPacketHandler handler) {
+        control_packet_handler_ = std::move(handler);
+    }
+
    private:
     int pollCompletedPackets(int cq_index, uint64_t current_ts);
 
@@ -61,6 +73,9 @@ class Context {
     int submitNormalRecvWR(PacketHandle& handle);
 
     int ensureSessionInitialized(int session);
+
+   private:
+    ControlPacketHandler control_packet_handler_;
 
    private:
     struct Task {

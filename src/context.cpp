@@ -3,8 +3,11 @@
 #include "context.h"
 
 #include "protocols/common/rdma_ud_endpoint.h"
+#include "ud_control_protocol.h"
 
 namespace rapid {
+using namespace ud;  // For PKT_CMD_CONTROL
+
 static inline uint64_t GetCurrentTS() {
     struct timeval tv_now;
     gettimeofday(&tv_now, nullptr);
@@ -177,6 +180,11 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
         return -1;
     }
 
+    // Debug logging for received packets
+    if (nr_poll > 0 && cq_index == RECV_CQ) {
+        LOG(INFO) << "[Context] Polled " << nr_poll << " completions from RECV_CQ";
+    }
+
     for (int i = 0; i < nr_poll; ++i) {
         auto request = (Request*)wc[i].wr_id;
         __sync_fetch_and_sub(request->qp_depth, 1);
@@ -334,6 +342,32 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc& wc) {
         ret = handle.deserialize(imm_data, wc.byte_len);
         if (ret) return ret;
         ibv_grh* grh = (ibv_grh*)request->addr[0];
+
+        // Check if this is a control message (session 63 is reserved for control)
+        // Control messages must be handled BEFORE findSession, because they don't
+        // have a pre-established session entry
+        constexpr uint8_t kControlSession = 63;
+        if (handle.session == kControlSession) {
+            LOG(INFO) << "[Context] Received control message on session " << kControlSession;
+            if (control_packet_handler_) {
+                // Convert GID to string for peer identification
+                char buf[8] = {0};
+                std::string gid_str;
+                for (size_t i = 0; i < 16; ++i) {
+                    sprintf(buf, "%02x", grh->sgid.raw[i]);
+                    gid_str += i == 0 ? buf : std::string(":") + buf;
+                }
+                std::string peer_name = gid_str + ":" + std::to_string(wc.src_qp);
+
+                // Get payload data
+                const uint8_t* payload_data = static_cast<const uint8_t*>(handle.getPayload());
+                size_t payload_length = handle.getPayloadLength();
+
+                control_packet_handler_(peer_name, payload_data, payload_length);
+            }
+            return submitNormalRecvWR(handle);
+        }
+
         int session =
             controller_.findSession(grh->sgid, wc.src_qp, handle.session);
         if (session >= 0) {
@@ -351,6 +385,7 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc& wc) {
             }
 
             RWSpinlock::ReadGuard guard(active_session_lock_);
+
             switch (handle.cmd) {
                 case PKT_CMD_DATA: {
                     auto& session_entry = active_session_map_[session];
@@ -367,6 +402,23 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc& wc) {
                     updateRTO(rtt);
                     updateWndOnSuccess(session, handle.wnd,
                                        *session_entry.send_queue);
+                    break;
+                }
+                case PKT_CMD_CONTROL: {
+                    // Control packet - route to control packet handler
+                    LOG(INFO) << "[Context] Received control packet, session=" << session
+                              << ", payload_length=" << handle.getPayloadLength();
+                    if (control_packet_handler_) {
+                        // TODO: Implement proper session to peer name mapping
+                        // For now, use session ID as peer name
+                        std::string peer_name = "session_" + std::to_string(session);
+
+                        // Get payload data
+                        const uint8_t* payload_data = static_cast<const uint8_t*>(handle.getPayload());
+                        size_t payload_length = handle.getPayloadLength();
+
+                        control_packet_handler_(peer_name, payload_data, payload_length);
+                    }
                     break;
                 }
                 default:
@@ -413,6 +465,88 @@ void Context::updateWndOnSuccess(int session, uint32_t rwnd,
     if (send_queue.getWndSize() != entry.cwnd) {
         send_queue.setWndSize(entry.cwnd);
     }
+}
+
+int Context::sendControl(const std::string& peer_name,
+                        const std::vector<uint8_t>& message) {
+    // Control messages use session 63 (max 6-bit value) to distinguish from data (session 0)
+    constexpr uint8_t kControlSession = 63;
+
+    // Find endpoint for peer (use data session 0 to get the endpoint)
+    int data_session = controller_.findSession(peer_name, 0);
+    if (data_session < 0) {
+        LOG(ERROR) << "[Context] No session found for peer " << peer_name;
+        return -1;
+    }
+
+    // Find or create endpoint for session
+    auto endpoint = controller_.getOrCreateEndpoint(data_session);
+    if (!endpoint) {
+        LOG(ERROR) << "[Context] Failed to get endpoint for session " << data_session;
+        return -1;
+    }
+
+    // Allocate packet buffer for control message
+    PacketHandle handle;
+    int ret = packet_manager_.getPool().allocatePacket(handle, false);
+    if (ret < 0) {
+        LOG(ERROR) << "[Context] Failed to allocate packet for control message";
+        return -1;
+    }
+
+    // Set control packet fields
+    handle.session = kControlSession;  // Control messages use session 63
+    handle.cmd = PKT_CMD_CONTROL;
+    handle.wnd = 0;
+    handle.sn = 0;
+    handle.ts = 0;
+    handle.compacted = false;
+    handle.inflight = true;
+
+    // Set payload
+    ret = handle.setPayload(const_cast<uint8_t*>(message.data()), message.size(), true);
+    if (ret < 0) {
+        LOG(ERROR) << "[Context] Failed to set payload for control message";
+        packet_manager_.getPool().freePacket(handle);
+        return -1;
+    }
+
+    // Serialize and send
+    Buffer slices[2];
+    uint32_t imm_data;
+    if (handle.serialize(slices, imm_data)) {
+        packet_manager_.getPool().freePacket(handle);
+        return -1;
+    }
+
+    // Get lkey for slices
+    auto& context = controller_.context();
+
+    // Get lkey for second slice only if it has a valid address
+    uint32_t lkey1 = 0;
+    if (slices[1].addr != nullptr) {
+        lkey1 = context.key(slices[1].addr).first;
+    }
+
+    Request* request = request_cache_.allocate();
+    new (request) Request{
+        .addr = {slices[0].addr, slices[1].addr},
+        .length = {slices[0].length, slices[1].length},
+        .lkey = {local_arena_lkey_, lkey1},
+        .imm_data = imm_data,
+        .context = &handle
+    };
+
+    ret = endpoint->postSendRequest({request});
+    if (ret != 1) {
+        LOG(ERROR) << "[Context] Failed to send control message, ret=" << ret;
+        request_cache_.deallocate(request);
+        packet_manager_.getPool().freePacket(handle);
+        return -1;
+    }
+
+    LOG(INFO) << "[Context] Control message posted to UD endpoint, ret=" << ret;
+    return 0;
 }
 
 }  // namespace rapid
