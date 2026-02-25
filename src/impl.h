@@ -1,9 +1,9 @@
 // impl.h
 //
-// RapidTransfer v1 Implementation
+// RapidTransfer v2 Implementation
 // Wraps existing RDMA UD Context
 //
-// Copyright (C) 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #ifndef TRANSFER_ENGINE_IMPL_H
 #define TRANSFER_ENGINE_IMPL_H
@@ -18,11 +18,6 @@
 
 #include "context.h"
 #include "rapid_transfer.h"
-
-// Forward declaration
-namespace rapid {
-class UDControlManager;
-}
 
 namespace rapid {
 namespace v1 {
@@ -108,8 +103,8 @@ class RapidTransfer::Impl {
     // Buffer Info Exchange
     // ========================================================================
 
-    void setBufferInfo(const BufferInfo& info);
-    std::optional<BufferInfo> getRemoteBufferInfo(const std::string& peer_address);
+    void setBufferInfo(const RapidTransfer::BufferInfo& info);
+    std::optional<RapidTransfer::BufferInfo> getRemoteBufferInfo(const std::string& peer_address);
 
    private:
     // ========================================================================
@@ -125,11 +120,8 @@ class RapidTransfer::Impl {
     // Member Variables
     // ========================================================================
 
-    // UD Context (direct use of existing UD implementation)
+    // UD Context with unified message processing
     Context ud_context_;
-
-    // UD Control Manager for control plane (replaces SessionManager)
-    ::rapid::UDControlManager* ud_control_manager_{nullptr};
 
     // Map from peer address to session name (e.g., "localhost:12348" ->
     // "server/0")
@@ -145,6 +137,7 @@ class RapidTransfer::Impl {
     std::unordered_map<TaskID, TransferResult> task_results_;
     mutable std::mutex task_results_mutex_;
     std::condition_variable task_cv_;
+    std::atomic<TaskID> next_task_id_{0};
 
     // Pending notifications (task_id -> {peer_name, message})
     struct PendingNotification {
@@ -154,6 +147,14 @@ class RapidTransfer::Impl {
     };
     std::unordered_map<TaskID, PendingNotification> pending_notifications_;
     mutable std::mutex notifications_mutex_;
+
+    // Local buffer info (for sharing with peers)
+    std::optional<RapidTransfer::BufferInfo> local_buffer_info_;
+    mutable std::mutex buffer_info_mutex_;
+
+    // Connected peers tracking
+    std::unordered_map<std::string, bool> connected_peers_;
+    mutable std::mutex connection_mutex_;
 
     // Notification callback
     NotificationCallback user_notification_callback_;

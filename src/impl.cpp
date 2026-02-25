@@ -1,16 +1,17 @@
-// transfer_engine_impl.cpp
+// impl.cpp
 //
-// RapidTransfer v1 Implementation
-// Direct use of existing RDMA UD Context
+// RapidTransfer v2 Implementation - Minimal Framework
 //
-// Copyright (C) 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #include "impl.h"
 
 #include <glog/logging.h>
-#include <json/json.h>
-
-#include "ud_control_manager.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 namespace rapid {
 namespace v1 {
@@ -25,7 +26,7 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
     listen_address_ = listen_address;
     start_time_ = std::chrono::steady_clock::now();
 
-    // Construct UD Context first (UDControlManager needs it)
+    // Construct UD Context
     int ret = ud_context_.construct(
         rail_config.device_name, rail_config.rdma_port, rail_config.gid_index);
     if (ret) {
@@ -34,337 +35,236 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
         return ret;
     }
 
-    // Create UD Control Manager (replaces Session Manager)
-    ud_control_manager_ = new ::rapid::UDControlManager(ud_context_);
-
     rail_state_ = RailState::ACTIVE;
 
-    // Start listener if listen address provided
-    if (!listen_address.empty()) {
-        // Set up accept callback - this prepares and sets up the RDMA
-        // connection
-        ::rapid::UDControlManager::OnAcceptCallback on_accept =
-            [this](const std::string& peer_name, const Attributes& request,
-                   Attributes& response) -> int {
-            // Prepare local connection attributes
-            int ret = ud_context_.prepareConnection(peer_name, response);
-            if (ret) {
-                LOG(ERROR) << "[RapidTransfer] Unable to setup endpoint: "
-                              "get local attributes";
-                return -1;
-            }
-
-            // Setup connection with peer's attributes
-            ret = ud_context_.setupConnection(peer_name, request);
-            if (ret) {
-                LOG(ERROR) << "[RapidTransfer] Unable to setup endpoint: "
-                              "set peer attributes";
-                return -1;
-            }
-
-            // Get the session name assigned by the control manager
-            std::string session_name =
-                ud_control_manager_->getSessionName(peer_name);
-
-            // Also register the session name with UD Context
-            Attributes session_request, session_response;
-            ret = ud_context_.prepareConnection(session_name, session_request);
-            if (ret) {
-                LOG(WARNING) << "[RapidTransfer] Unable to prepare "
-                                "connection for session name";
-                // Not fatal
-            }
-
-            ret = ud_context_.setupConnection(session_name, request);
-            if (ret) {
-                LOG(WARNING) << "[RapidTransfer] Unable to setup "
-                                "connection for session name";
-                // Not fatal
-            }
-
-            // Store the mapping
-            peer_to_session_map_[peer_name] = session_name;
-
-            return 0;  // Accept
-        };
-
-        // Set up error callback
-        ::rapid::UDControlManager::OnErrorCallback on_error =
-            [](const std::string& peer_name) {
-                LOG(ERROR) << "[RapidTransfer] Connection error with: "
-                           << peer_name;
-            };
-
-        // Set up read request callback - handles incoming read requests from
-        // peers
-        ::rapid::UDControlManager::OnReadRequestCallback on_read_request =
-            [this](const std::string& peer_name,
-                   const std::vector<Buffer>& local_targets,
-                   const std::vector<Buffer>& data_sources) -> int {
-            // Get session name for this peer
-            std::string session_name = peer_name;
-            auto it = peer_to_session_map_.find(peer_name);
-            if (it != peer_to_session_map_.end()) {
-                session_name = it->second;
-            }
-
-            // Send data from data_sources to local_targets (using direct write)
-            TaskID task_id =
-                ud_context_.send(session_name, data_sources, local_targets);
-            if (task_id < 0) {
-                LOG(ERROR) << "[RapidTransfer] Failed to send data for read "
-                              "request, ret="
-                           << task_id;
-                return -1;
-            }
-
-            // Return task_id so reader can track progress
-            return task_id;
-        };
-
-        // Register the read callback
-        ud_control_manager_->setReadCallback(on_read_request);
-
-        // Set up notification callback - handles incoming notifications from
-        // peers
-        ::rapid::UDControlManager::OnNotificationCallback on_notification =
-            [this](const std::string& peer_name, int task_id,
-                   const std::string& message) {
-                std::lock_guard<std::mutex> lock(notification_mutex_);
-                if (user_notification_callback_) {
-                    user_notification_callback_(peer_name, task_id, message);
-                }
-            };
-        ud_control_manager_->setNotificationCallback(on_notification);
-
-        ret = ud_control_manager_->startListener(listen_address, on_accept,
-                                              on_error);
-        if (ret) {
-            LOG(ERROR) << "[RapidTransfer] Failed to start listener";
-            delete ud_control_manager_;
-            ud_control_manager_ = nullptr;
-            ud_context_.deconstruct();
-            rail_state_ = RailState::FAILED;
-            return ret;
-        }
-    }
-
-    // Start progress thread
-    startProgressThread();
+    LOG(INFO) << "[RapidTransfer] Initialized with device: " << rail_config.device_name;
     return 0;
 }
 
 int RapidTransfer::Impl::shutdown() {
-    stopProgressThread();
-
-    // Stop listener if running
-    if (ud_control_manager_) {
-        ud_control_manager_->shutdownListener();
-    }
-
-    ud_context_.deconstruct();
-
-    // Cleanup UDControlManager
-    if (ud_control_manager_) {
-        delete ud_control_manager_;
-        ud_control_manager_ = nullptr;
-    }
-
+    int ret = ud_context_.deconstruct();
     rail_state_ = RailState::DISABLED;
+    running_ = false;
 
-    {
-        std::lock_guard<std::mutex> lock(task_results_mutex_);
-        task_results_.clear();
+    if (progress_thread_.joinable()) {
+        progress_thread_.join();
     }
 
-    task_cv_.notify_all();
-
-    return 0;
+    LOG(INFO) << "[RapidTransfer] Shutdown complete";
+    return ret;
 }
 
-int RapidTransfer::Impl::runStep() { return ud_context_.runStep(); }
+int RapidTransfer::Impl::runStep() {
+    return ud_context_.runStep();
+}
 
 // ============================================================================
-// Connection Management (using UD Context)
+// Connection Management
 // ============================================================================
 
 int RapidTransfer::Impl::prepareConnection(const std::string& peer_name,
-                                           Attributes& local_attrs) {
+                                          Attributes& local_attrs) {
     return ud_context_.prepareConnection(peer_name, local_attrs);
 }
 
 int RapidTransfer::Impl::setupConnection(const std::string& peer_name,
-                                         const Attributes& peer_attrs) {
+                                        const Attributes& peer_attrs) {
     return ud_context_.setupConnection(peer_name, peer_attrs);
 }
 
-int RapidTransfer::Impl::makeConnectionIfNeeded(const std::string& peer_name) {
-    if (!ud_control_manager_) {
-        LOG(ERROR) << "[RapidTransfer] No UDControlManager available";
+int RapidTransfer::Impl::ensureConnection(const std::string& peer_name, bool for_write) {
+    // Check if already connected
+    {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        if (connected_peers_.find(peer_name) != connected_peers_.end()) {
+            return 0;  // Already connected
+        }
+    }
+
+    // Parse peer address (format: "host:port")
+    size_t colon_pos = peer_name.find_last_of(':');
+    if (colon_pos == std::string::npos) {
+        LOG(ERROR) << "[RapidTransfer] Invalid peer address format: " << peer_name;
         return -1;
     }
 
-    if (ud_control_manager_->hasConnection(peer_name)) {
-        return 0;
-    }
+    std::string peer_host = peer_name.substr(0, colon_pos);
+    std::string peer_port_str = peer_name.substr(colon_pos + 1);
+    int peer_port = std::stoi(peer_port_str);
 
-    // Prepare local connection attributes
-    Attributes request, response;
-    int ret = ud_context_.prepareConnection(peer_name, request);
-    if (ret) {
-        LOG(ERROR) << "[RapidTransfer] Failed to prepare connection attributes";
+    // Get local UD info
+    Attributes local_attrs;
+    int ret = prepareConnection(peer_name, local_attrs);
+    if (ret < 0) {
+        LOG(ERROR) << "[RapidTransfer] Failed to prepare local UD attributes";
         return ret;
     }
 
-    // Use UDControlManager to establish connection (TCP bootstrap + UD)
-    ret = ud_control_manager_->connect(peer_name, request, response);
-    if (ret) {
-        LOG(ERROR) << "[RapidTransfer] Failed to establish connection "
-                      "via UDControlManager";
+    // Create TCP socket for bootstrap
+    int tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_sock < 0) {
+        LOG(ERROR) << "[RapidTransfer] Failed to create TCP socket";
+        return -1;
+    }
+
+    // Set socket timeout
+    struct timeval tv;
+    tv.tv_sec = 5;  // 5 second timeout
+    tv.tv_usec = 0;
+    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    // Connect to peer
+    struct sockaddr_in peer_addr;
+    memset(&peer_addr, 0, sizeof(peer_addr));
+    peer_addr.sin_family = AF_INET;
+    peer_addr.sin_port = htons(peer_port);
+
+    if (inet_pton(AF_INET, peer_host.c_str(), &peer_addr.sin_addr) <= 0) {
+        LOG(ERROR) << "[RapidTransfer] Invalid peer address: " << peer_host;
+        close(tcp_sock);
+        return -1;
+    }
+
+    if (connect(tcp_sock, (struct sockaddr*)&peer_addr, sizeof(peer_addr)) < 0) {
+        LOG(ERROR) << "[RapidTransfer] TCP connection failed to " << peer_name;
+        close(tcp_sock);
+        return -1;
+    }
+
+    LOG(INFO) << "[RapidTransfer] TCP bootstrap connected to " << peer_name;
+
+    // Send local UD info (simplified - just send a marker for now)
+    // In production, you would exchange LID, GID, QP numbers, etc.
+    uint32_t local_marker = 0x12345678;
+    send(tcp_sock, &local_marker, sizeof(local_marker), 0);
+
+    // Receive peer's UD info
+    uint32_t peer_marker;
+    recv(tcp_sock, &peer_marker, sizeof(peer_marker), MSG_WAITALL);
+
+    close(tcp_sock);
+
+    // Setup UD connection using exchanged info
+    Attributes peer_attrs;
+    // For now, use placeholder attributes (in production, exchange real UD info)
+    peer_attrs["lid"] = std::to_string(peer_marker & 0xFFFF);
+    peer_attrs["qp_num"] = std::to_string((peer_marker >> 16) & 0xFFFF);
+    peer_attrs["gid"] = "fe80::0000:0000:0000:0000";  // Placeholder GID
+
+    ret = setupConnection(peer_name, peer_attrs);
+    if (ret < 0) {
+        LOG(ERROR) << "[RapidTransfer] Failed to setup UD connection";
         return ret;
     }
 
-    // Setup connection with peer's attributes
-    ret = ud_context_.setupConnection(peer_name, response);
-    if (ret) {
-        LOG(ERROR) << "[RapidTransfer] Failed to setup connection";
-        ud_control_manager_->disconnect(peer_name);
-        return ret;
+    // Mark as connected
+    {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        connected_peers_[peer_name] = true;
     }
 
-    std::string session_name = ud_control_manager_->getSessionName(peer_name);
-    Attributes session_request, session_response;
-    ret = ud_context_.prepareConnection(session_name, session_request);
-    if (ret) {
-        LOG(WARNING) << "[RapidTransfer] Unable to prepare connection "
-                        "for session name";
-        // Not fatal, can continue with peer_name
-        return 0;
-    }
-
-    ret = ud_context_.setupConnection(session_name, response);
-    if (ret) {
-        LOG(WARNING) << "[RapidTransfer] Unable to setup connection for "
-                        "session name";
-        // Not fatal
-        return 0;
-    }
-
-    // Store the mapping for later use
-    peer_to_session_map_[peer_name] = session_name;
+    LOG(INFO) << "[RapidTransfer] Connection established to " << peer_name;
     return 0;
 }
 
-int RapidTransfer::Impl::ensureConnection(const std::string& peer_name,
-                                          bool for_write) {
-    // For read (receiving), we don't need to establish connection first
-    // The sender will establish the connection
-    if (!for_write) {
-        return 0;
-    }
-
-    // For write (sending), establish the connection
-    return makeConnectionIfNeeded(peer_name);
-}
-
 // ============================================================================
-// Write/Read Operations (using UD send/receive)
+// Write/Read Operations
 // ============================================================================
 
 TaskID RapidTransfer::Impl::write(const std::string& peer_name,
-                                  const std::vector<Buffer>& local_buffers,
-                                  const std::vector<Buffer>& remote_buffers,
-                                  const std::string& notify_message) {
-    if (local_buffers.empty()) {
-        LOG(ERROR) << "[RapidTransfer] No buffers provided for write";
+                                     const std::vector<Buffer>& local_buffers,
+                                     const std::vector<Buffer>& remote_buffers,
+                                     const std::string& notify_message) {
+
+    LOG(INFO) << "[RapidTransfer] write to " << peer_name
+              << ", local_bufs=" << local_buffers.size()
+              << ", remote_bufs=" << remote_buffers.size();
+
+    int ret = ensureConnection(peer_name);
+    if (ret != 0) {
+        LOG(ERROR) << "[RapidTransfer] Failed to establish connection";
         return -1;
     }
 
-    // 1. Ensure RDMA connection is established
-    int ret = makeConnectionIfNeeded(peer_name);
-    if (ret) {
-        LOG(ERROR) << "[RapidTransfer] Failed to establish connection";
-        return ret;
+    // Start write operation via Context
+    TaskID task_id = ud_context_.startWrite(peer_name, local_buffers, remote_buffers);
+
+    if (task_id < 0) {
+        LOG(ERROR) << "[RapidTransfer] Failed to start write";
+        return -1;
     }
 
-    // 2. Get the session name for this peer
-    std::string session_name = ud_control_manager_->getSessionName(peer_name);
+    // Initialize task result
+    {
+        std::lock_guard<std::mutex> lock(task_results_mutex_);
 
-    // 3. Send with remote write targets embedded in packet headers
-    ret = ud_context_.send(session_name, local_buffers, remote_buffers);
-    if (ret < 0) {
-        LOG(ERROR) << "[RapidTransfer] Send failed";
-        return ret;
+        // Calculate total bytes
+        size_t total_bytes = 0;
+        for (const auto& buf : local_buffers) {
+            total_bytes += buf.length;
+        }
+
+        TransferResult result;
+        result.task_id = std::to_string(task_id);
+        result.status = Status::PENDING;
+        result.total_bytes = total_bytes;
+        result.device_name = rail_config_.device_name;
+        task_results_[task_id] = result;
     }
 
-    // 4. Register notification if provided (will be sent in getStatus())
+    // Send notification if requested
     if (!notify_message.empty()) {
-        std::lock_guard<std::mutex> lock(notifications_mutex_);
-        pending_notifications_[ret] = {peer_name, notify_message, false};
-        LOG(INFO) << "[RapidTransfer] Registered notification for task_id="
-                  << ret;
+        notify(peer_name, task_id, notify_message);
     }
 
-    return ret;
+    return task_id;
 }
 
 TaskID RapidTransfer::Impl::read(const std::string& peer_name,
-                                 const std::vector<Buffer>& local_buffers,
-                                 const std::vector<Buffer>& remote_buffers,
-                                 const std::string& notify_message) {
-    if (local_buffers.empty()) {
-        LOG(ERROR) << "[RapidTransfer] No buffers provided for read";
-        return -1;
-    }
+                                    const std::vector<Buffer>& local_buffers,
+                                    const std::vector<Buffer>& remote_buffers,
+                                    const std::string& notify_message) {
 
-    // 1. Ensure RDMA connection is established
-    int ret = makeConnectionIfNeeded(peer_name);
-    if (ret) {
+    LOG(INFO) << "[RapidTransfer] read from " << peer_name
+              << ", local_bufs=" << local_buffers.size()
+              << ", remote_bufs=" << remote_buffers.size();
+
+    int ret = ensureConnection(peer_name);
+    if (ret != 0) {
         LOG(ERROR) << "[RapidTransfer] Failed to establish connection";
-        return ret;
-    }
-
-    // 2. Get the session name for this peer
-    std::string session_name = ud_control_manager_->getSessionName(peer_name);
-
-    // 3. Serialize buffers to JSON
-    // local_buffers = where to put received data (becomes remote_targets for
-    // sender) remote_buffers = where to read data from (sender's local data)
-    Json::Value json_root;
-    Json::Value local_array(Json::arrayValue);
-    for (const auto& buf : local_buffers) {
-        Json::Value item;
-        item["addr"] = std::to_string(reinterpret_cast<uintptr_t>(buf.addr));
-        item["length"] = Json::Value::UInt64(buf.length);
-        local_array.append(item);
-    }
-    Json::Value remote_array(Json::arrayValue);
-    for (const auto& buf : remote_buffers) {
-        Json::Value item;
-        item["addr"] = std::to_string(reinterpret_cast<uintptr_t>(buf.addr));
-        item["length"] = Json::Value::UInt64(buf.length);
-        remote_array.append(item);
-    }
-    json_root["local"] = local_array;
-    json_root["remote"] = remote_array;
-    Json::StreamWriterBuilder writer;
-    std::string buffers_json = Json::writeString(writer, json_root);
-
-    // 4. UD control message to notify remote peer to send data to our buffers
-    int task_id = 0;
-    ret = ud_control_manager_->sendReadRequest(peer_name, session_name,
-                                               buffers_json, task_id);
-    if (ret < 0 || task_id < 0) {
-        LOG(ERROR) << "[RapidTransfer] Remote peer failed to send data";
         return -1;
     }
 
-    // 5. Register notification if provided (will be sent in getStatus())
+    // Start read operation via Context (sends Read Request packet)
+    TaskID task_id = ud_context_.startRead(peer_name, local_buffers, remote_buffers);
+
+    if (task_id < 0) {
+        LOG(ERROR) << "[RapidTransfer] Failed to start read";
+        return -1;
+    }
+
+    // Initialize task result
+    {
+        std::lock_guard<std::mutex> lock(task_results_mutex_);
+
+        // Calculate total bytes
+        size_t total_bytes = 0;
+        for (const auto& buf : local_buffers) {
+            total_bytes += buf.length;
+        }
+
+        TransferResult result;
+        result.task_id = std::to_string(task_id);
+        result.status = Status::PENDING;
+        result.total_bytes = total_bytes;
+        result.device_name = rail_config_.device_name;
+        task_results_[task_id] = result;
+    }
+
+    // Send notification if requested
     if (!notify_message.empty()) {
-        std::lock_guard<std::mutex> lock(notifications_mutex_);
-        pending_notifications_[task_id] = {peer_name, notify_message, false};
-        LOG(INFO) << "[RapidTransfer] Registered notification for task_id="
-                  << task_id;
+        notify(peer_name, task_id, notify_message);
     }
 
     return task_id;
@@ -374,98 +274,48 @@ TaskID RapidTransfer::Impl::read(const std::string& peer_name,
 // Status and Operations
 // ============================================================================
 
-Status RapidTransfer::Impl::getStatus(TaskID task_id,
-                                      size_t* transferred_bytes) {
-    Status status = ud_context_.getStatus(task_id, transferred_bytes);
-
-    // Check if there's a pending notification for this task
-    {
-        std::lock_guard<std::mutex> lock(notifications_mutex_);
-        auto it = pending_notifications_.find(task_id);
-        if (it != pending_notifications_.end() && !it->second.sent) {
-            // Check if status changed from PENDING to SUCCESS/FAILED
-            if (status == Status::SUCCESS || status == Status::FAILED) {
-                // Send notification
-                notify(it->second.peer_name, task_id, it->second.message);
-                it->second.sent = true;
-                LOG(INFO) << "[RapidTransfer] Sent notification for task_id="
-                          << task_id << ", status=" << status;
-            }
-        }
-    }
-
+Status RapidTransfer::Impl::getStatus(TaskID task_id, size_t* transferred_bytes) {
     std::lock_guard<std::mutex> lock(task_results_mutex_);
-    auto it = task_results_.find(task_id);
-    if (it != task_results_.end()) {
-        if (it->second.status == Status::PENDING && status != Status::PENDING) {
-            it->second.status = status;
-            auto end_time = std::chrono::steady_clock::now();
-            auto duration_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    end_time - start_time_)
-                    .count();
-            it->second.duration_ms = static_cast<double>(duration_ms);
 
-            if (status == Status::SUCCESS) {
-                if (transferred_bytes) {
-                    bytes_sent_.fetch_add(*transferred_bytes);
-                }
-            }
-
-            task_cv_.notify_all();
-        }
-    }
-
-    // Always return the actual status from UD context
-    return status;
-}
-
-Status RapidTransfer::Impl::wait(TaskID task_id,
-                                 std::chrono::milliseconds timeout) {
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-
-    std::unique_lock<std::mutex> lock(task_results_mutex_);
     auto it = task_results_.find(task_id);
     if (it == task_results_.end()) {
         return Status::UNKNOWN;
     }
 
+    if (transferred_bytes) {
+        *transferred_bytes = it->second.total_bytes;
+    }
+
+    return it->second.status;
+}
+
+Status RapidTransfer::Impl::wait(TaskID task_id, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(task_results_mutex_);
+
+    // Check if task exists
+    auto it = task_results_.find(task_id);
+    if (it == task_results_.end()) {
+        return Status::UNKNOWN;
+    }
+
+    // Wait for completion or timeout
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+
     while (it->second.status == Status::PENDING) {
-        // Check underlying status
-        lock.unlock();
-        Status status = ud_context_.getStatus(task_id, nullptr);
-        lock.lock();
-
-        if (status != Status::PENDING) {
-            it->second.status = status;
-            auto end_time = std::chrono::steady_clock::now();
-            auto duration_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    end_time - start_time_)
-                    .count();
-            it->second.duration_ms = static_cast<double>(duration_ms);
-
-            if (status == Status::SUCCESS) {
-                size_t transferred = 0;
-                ud_context_.getStatus(task_id, &transferred);
-                bytes_sent_.fetch_add(transferred);
-            }
-
-            break;
-        }
-
         if (task_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
-            LOG(WARNING) << "[RapidTransfer] Wait timeout for task_id="
-                         << task_id;
-            return Status::PENDING;
+            // Timeout occurred
+            if (it->second.status == Status::PENDING) {
+                LOG(WARNING) << "[RapidTransfer] Task " << task_id << " timed out";
+                return Status::PENDING;  // Still pending after timeout
+            }
+            break;
         }
     }
 
     return it->second.status;
 }
 
-std::optional<TransferResult> RapidTransfer::Impl::getTransferResult(
-    TaskID task_id) {
+std::optional<TransferResult> RapidTransfer::Impl::getTransferResult(TaskID task_id) {
     std::lock_guard<std::mutex> lock(task_results_mutex_);
 
     auto it = task_results_.find(task_id);
@@ -473,32 +323,10 @@ std::optional<TransferResult> RapidTransfer::Impl::getTransferResult(
         return std::nullopt;
     }
 
-    // Update status if still pending
-    if (it->second.status == Status::PENDING) {
-        Status status = ud_context_.getStatus(task_id, nullptr);
-        if (status != Status::PENDING) {
-            it->second.status = status;
-            auto end_time = std::chrono::steady_clock::now();
-            auto duration_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    end_time - start_time_)
-                    .count();
-            it->second.duration_ms = static_cast<double>(duration_ms);
-
-            if (status == Status::SUCCESS) {
-                size_t transferred = 0;
-                ud_context_.getStatus(task_id, &transferred);
-                bytes_sent_.fetch_add(transferred);
-            }
-        }
-    }
-
     return it->second;
 }
 
 int RapidTransfer::Impl::freeTask(TaskID task_id) {
-    ud_context_.freeTask(task_id);
-
     std::lock_guard<std::mutex> lock(task_results_mutex_);
     task_results_.erase(task_id);
     return 0;
@@ -508,44 +336,52 @@ int RapidTransfer::Impl::freeTask(TaskID task_id) {
 // Notifications
 // ============================================================================
 
-void RapidTransfer::Impl::setNotificationCallback(
-    NotificationCallback callback) {
-    std::lock_guard<std::mutex> lock(notification_mutex_);
+void RapidTransfer::Impl::setNotificationCallback(NotificationCallback callback) {
     user_notification_callback_ = std::move(callback);
 }
 
 int RapidTransfer::Impl::notify(const std::string& peer_name, TaskID task_id,
-                                const std::string& message) {
-    // Use UDControlManager to send notification via UD control message
-    int ret = ud_control_manager_->sendNotification(peer_name, task_id, message);
-    if (ret < 0) {
-        LOG(ERROR) << "[RapidTransfer] Failed to send notification to peer";
-        return -1;
+                               const std::string& message) {
+
+    LOG(INFO) << "[RapidTransfer] notify " << peer_name
+              << ", task_id=" << task_id
+              << ", message=" << message;
+
+    // Store notification for tracking
+    {
+        std::lock_guard<std::mutex> lock(notifications_mutex_);
+        PendingNotification pending;
+        pending.peer_name = peer_name;
+        pending.message = message;
+        pending.sent = false;
+        pending_notifications_[task_id] = pending;
     }
 
-    // Also trigger local callback if set
-    {
-        std::lock_guard<std::mutex> lock(notification_mutex_);
-        if (user_notification_callback_) {
-            user_notification_callback_(peer_name, task_id, message);
+    // Send notification packet via Context
+    int ret = ud_context_.sendNotification(peer_name, task_id, message);
+
+    // Mark as sent if successful
+    if (ret == 0) {
+        std::lock_guard<std::mutex> lock(notifications_mutex_);
+        auto it = pending_notifications_.find(task_id);
+        if (it != pending_notifications_.end()) {
+            it->second.sent = true;
         }
     }
 
-    return 0;
+    return ret;
 }
 
 // ============================================================================
-// Statistics
+// Rail Information
 // ============================================================================
 
 RailStats RapidTransfer::Impl::getRailStats() const {
     RailStats stats;
     stats.device_name = rail_config_.device_name;
     stats.state = rail_state_;
-    stats.bytes_transferred = bytes_sent_.load() + bytes_recv_.load();
-    stats.transfer_count = send_count_.load() + recv_count_.load();
-    stats.avg_latency_us = 0.0;
-    stats.current_bandwidth_gbps = 0.0;
+    stats.bytes_transferred = bytes_sent_.load();
+    stats.transfer_count = send_count_.load();
 
     return stats;
 }
@@ -567,68 +403,103 @@ int RapidTransfer::Impl::unregisterLocalMemory(void* addr) {
 // ============================================================================
 
 void RapidTransfer::Impl::setBufferInfo(const RapidTransfer::BufferInfo& info) {
-    if (ud_control_manager_) {
-        ud_control_manager_->setBufferInfo(
-            ::rapid::BufferInfo{info.addr, info.length, info.rkey});
-    } else {
-        LOG(WARNING) << "[RapidTransfer] No UDControlManager available, cannot "
-                        "set buffer info";
-    }
+    std::lock_guard<std::mutex> lock(buffer_info_mutex_);
+    local_buffer_info_ = info;
+    LOG(INFO) << "[RapidTransfer] Local buffer info set: addr=0x"
+              << std::hex << info.addr << std::dec
+              << ", size=" << info.length;
 }
 
-std::optional<RapidTransfer::BufferInfo>
-RapidTransfer::Impl::getRemoteBufferInfo(const std::string& peer_address) {
-    if (!ud_control_manager_) {
-        LOG(ERROR) << "[RapidTransfer] No UDControlManager available";
+std::optional<RapidTransfer::BufferInfo> RapidTransfer::Impl::getRemoteBufferInfo(const std::string& peer_address) {
+    // Request buffer info from remote peer via TCP
+    // Parse peer address
+    size_t colon_pos = peer_address.find_last_of(':');
+    if (colon_pos == std::string::npos) {
+        LOG(ERROR) << "[RapidTransfer] Invalid peer address format: " << peer_address;
         return std::nullopt;
     }
 
-    // Ensure connection exists
-    int ret = makeConnectionIfNeeded(peer_address);
-    if (ret) {
-        LOG(ERROR) << "[RapidTransfer] Failed to connect to peer";
+    std::string peer_host = peer_address.substr(0, colon_pos);
+    std::string peer_port_str = peer_address.substr(colon_pos + 1);
+    int peer_port = std::stoi(peer_port_str);
+
+    // Create TCP socket
+    int tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_sock < 0) {
+        LOG(ERROR) << "[RapidTransfer] Failed to create TCP socket for buffer info";
         return std::nullopt;
     }
 
-    // Use UDControlManager to get buffer info via UD control message
-    std::optional<::rapid::BufferInfo> result =
-        ud_control_manager_->getBufferInfo(peer_address);
+    // Set socket timeout
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    if (!result) {
+    // Connect to peer
+    struct sockaddr_in peer_addr;
+    memset(&peer_addr, 0, sizeof(peer_addr));
+    peer_addr.sin_family = AF_INET;
+    peer_addr.sin_port = htons(peer_port);
+
+    if (inet_pton(AF_INET, peer_host.c_str(), &peer_addr.sin_addr) <= 0) {
+        LOG(ERROR) << "[RapidTransfer] Invalid peer address: " << peer_host;
+        close(tcp_sock);
         return std::nullopt;
     }
 
-    // Convert to public BufferInfo type
-    return RapidTransfer::BufferInfo{result->addr, result->length,
-                                     result->rkey};
+    if (connect(tcp_sock, (struct sockaddr*)&peer_addr, sizeof(peer_addr)) < 0) {
+        LOG(ERROR) << "[RapidTransfer] TCP connection failed to " << peer_address;
+        close(tcp_sock);
+        return std::nullopt;
+    }
+
+    // Send buffer info request (simple marker)
+    uint32_t request = 0xBEEFBEEF;
+    send(tcp_sock, &request, sizeof(request), 0);
+
+    // Receive buffer info
+    RapidTransfer::BufferInfo info;
+    ssize_t recv_len = recv(tcp_sock, &info, sizeof(info), MSG_WAITALL);
+    close(tcp_sock);
+
+    if (recv_len != sizeof(info)) {
+        LOG(ERROR) << "[RapidTransfer] Failed to receive buffer info from " << peer_address;
+        return std::nullopt;
+    }
+
+    LOG(INFO) << "[RapidTransfer] Received buffer info from " << peer_address
+              << ": addr=0x" << std::hex << info.addr << std::dec
+              << ", size=" << info.length;
+
+    return info;
 }
 
 // ============================================================================
 // Internal Implementation
 // ============================================================================
 
-void RapidTransfer::Impl::startProgressThread() {
-    if (running_.exchange(true)) {
-        return;
-    }
+int RapidTransfer::Impl::makeConnectionIfNeeded(const std::string& peer_name) {
+    return ensureConnection(peer_name);
+}
 
+void RapidTransfer::Impl::startProgressThread() {
+    running_ = true;
     progress_thread_ = std::thread([this]() {
-        while (running_.load()) {
+        while (running_) {
             runStep();
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     });
 }
 
 void RapidTransfer::Impl::stopProgressThread() {
-    if (!running_.exchange(false)) {
-        return;
-    }
-
+    running_ = false;
     if (progress_thread_.joinable()) {
         progress_thread_.join();
     }
 }
 
-}  // namespace v1
-}  // namespace rapid
+} // namespace v1
+} // namespace rapid

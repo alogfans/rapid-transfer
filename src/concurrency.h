@@ -1,5 +1,5 @@
 // concurrency.h
-// Copyright (C) 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #ifndef CONCURRENCY_H
 #define CONCURRENCY_H

@@ -1,4 +1,4 @@
-// Copyright 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #include "controller.h"
 

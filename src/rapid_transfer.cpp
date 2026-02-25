@@ -1,10 +1,10 @@
 // rapid_transfer_engine.cpp
 //
-// RapidTransfer v1 Implementation
+// RapidTransfer v2 Implementation
 // Single-rail instance per class, multi-rail orchestration by upper layer
 // Uses existing UD protocol (RdmaUnreliableProtocol Context)
 //
-// Copyright (C) 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #include <glog/logging.h>
 

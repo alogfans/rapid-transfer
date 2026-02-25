@@ -1,5 +1,5 @@
 // protocol.h
-// Copyright (C) 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #ifndef PROTOCOL_H
 #define PROTOCOL_H

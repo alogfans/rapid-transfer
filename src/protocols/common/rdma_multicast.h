@@ -1,4 +1,4 @@
-// Copyright 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #ifndef RDMA_MULTICAST_H
 #define RDMA_MULTICAST_H

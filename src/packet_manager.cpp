@@ -1,4 +1,6 @@
-// Copyright 2024 Feng Ren
+// packet_manager.cpp
+// Copyright (C) 2026 RapidXfer Team
+// Simplified - Only PacketBufferPool implementation
 
 #include "packet_manager.h"
 
@@ -7,180 +9,13 @@
 #include <numa.h>
 
 #include <fstream>
+#include <libgen.h>
 
 namespace rapid {
 
 const static size_t kGRHSize = sizeof(ibv_grh);
 
-PacketHandle::PacketHandle() : packet_buf(nullptr) {}
-
-int PacketHandle::setRawPacket(void* packet_buf, bool with_grh) {
-    auto& handle = *this;
-    handle.packet_buf = packet_buf;
-    handle.session = 0;
-    handle.cmd = 0;
-    handle.wnd = 0;
-    handle.sn = 0;
-    handle.ts = 0;
-    handle.compacted = false;
-    handle.inflight = false;
-    handle.data_buf = nullptr;
-    handle.data_len = 0;
-    handle.pkt_hdr_imm.raw = 0;
-    handle.with_grh = with_grh;
-    return 0;
-}
-
-int PacketHandle::setPayload(void* data, size_t length, bool do_copy) {
-    auto& handle = *this;
-    if (!handle.packet_buf) {
-        LOG(ERROR) << "unable to set data: packet buf not specified";
-        return -1;
-    }
-
-    if (!data && length) {
-        LOG(ERROR) << "invalid argument: data is nullptr";
-        return -1;
-    }
-
-    if (do_copy) {
-        auto pkt_data = (uint8_t*)handle.packet_buf + sizeof(PktHdr) +
-                        (with_grh ? kGRHSize : 0);
-        memmove(pkt_data, data, length);
-        handle.data_buf = nullptr;
-    } else
-        handle.data_buf = data;
-    handle.data_len = length;
-    return 0;
-}
-
-void* PacketHandle::getPayload() {
-    auto& handle = *this;
-    if (!handle.packet_buf || !handle.data_len) return nullptr;
-    if (handle.data_buf) return handle.data_buf;
-    return (char*)handle.packet_buf + sizeof(PktHdr) +
-           (with_grh ? kGRHSize : 0);
-}
-
-int PacketHandle::deserialize(uint32_t imm_data, uint32_t packet_length) {
-    if (with_grh) {
-        if (packet_length < sizeof(PktHdr) + kGRHSize) {
-            LOG(ERROR) << "packet length must be larger than header & GRH size";
-            return -1;
-        }
-        pkt_hdr_imm.raw = imm_data;
-        data_len = packet_length - sizeof(PktHdr) - kGRHSize;
-    } else {
-        if (packet_length < sizeof(PktHdr)) {
-            LOG(ERROR) << "packet length must be larger than header size";
-            return -1;
-        }
-        pkt_hdr_imm.raw = imm_data;
-        data_len = packet_length - sizeof(PktHdr);
-    }
-    return decode();
-}
-
-int PacketHandle::serialize(Buffer* slices, uint32_t& imm_data) {
-    auto& handle = *this;
-    if (!handle.packet_buf) {
-        LOG(ERROR) << "unable to get stream: packet buf not specified";
-        return -1;
-    }
-    if (with_grh) {
-        LOG(ERROR) << "refuse to send packet with GRH field";
-        return -1;
-    }
-    if (encode()) return -1;
-    imm_data = handle.pkt_hdr_imm.raw;
-    if (!handle.data_buf) {
-        // 1. no attach data
-        // 2a. 2a. has attach data, w/o zero copy
-        slices[0] = Buffer{.addr = handle.packet_buf,
-                           .length = sizeof(PktHdr) + handle.data_len};
-        slices[1] = Buffer{.addr = nullptr, .length = 0};
-    } else {
-        // 2b. has attach data, w/ zero copy
-        slices[0] = Buffer{.addr = handle.packet_buf, .length = sizeof(PktHdr)};
-        slices[1] = Buffer{.addr = handle.data_buf, .length = handle.data_len};
-    }
-    return 0;
-}
-
-int PacketHandle::serialize(std::vector<Buffer>& slices, uint32_t& imm_data) {
-    auto& handle = *this;
-    if (!handle.packet_buf) {
-        LOG(ERROR) << "unable to get stream: packet buf not specified";
-        return -1;
-    }
-    if (with_grh) {
-        LOG(ERROR) << "refuse to send packet with GRH field";
-        return -1;
-    }
-    if (encode()) return -1;
-    imm_data = handle.pkt_hdr_imm.raw;
-    slices.clear();
-    if (!handle.data_buf) {
-        // 1. no attach data
-        // 2a. 2a. has attach data, w/o zero copy
-        slices.push_back(Buffer{.addr = handle.packet_buf,
-                                .length = sizeof(PktHdr) + handle.data_len});
-    } else {
-        // 2b. has attach data, w/ zero copy
-        slices.push_back(
-            Buffer{.addr = handle.packet_buf, .length = sizeof(PktHdr)});
-        slices.push_back(
-            Buffer{.addr = handle.data_buf, .length = handle.data_len});
-    }
-    return 0;
-}
-
-int PacketHandle::encode() {
-    auto& handle = *this;
-    if (!handle.packet_buf) {
-        LOG(ERROR) << "unable to encode: packet buf not specified";
-        return -1;
-    }
-    PktHdrImm pkt_hdr;
-    pkt_hdr.session = handle.session & ((1 << 6) - 1);
-    pkt_hdr.cmd = handle.cmd & 0x1;
-    pkt_hdr.compacted = handle.compacted ? 1 : 0;
-    pkt_hdr.sn[0] = uint8_t(handle.sn & 0xff);
-    pkt_hdr.sn[1] = uint8_t((handle.sn >> 8) & 0xff);
-    pkt_hdr.sn[2] = uint8_t((handle.sn >> 16) & 0xff);
-    handle.pkt_hdr_imm.raw = pkt_hdr.raw;
-    if (!pkt_hdr.compacted) {
-        PktHdr* hdr = (PktHdr*)handle.packet_buf;
-        hdr->wnd = htole16(handle.wnd);
-        hdr->ts_lo = htole16(uint16_t(handle.ts & 0xffff));
-        hdr->ts_hi = htole32(uint32_t((handle.ts >> 16) & 0xffffffff));
-        hdr->remote_addr = htole64(handle.remote_addr);
-    }
-    return 0;
-}
-
-int PacketHandle::decode() {
-    auto& handle = *this;
-    if (!handle.packet_buf) {
-        LOG(ERROR) << "unable to decode: packet buf not specified";
-        return -1;
-    }
-    PktHdrImm pkt_hdr = handle.pkt_hdr_imm;
-    if (!pkt_hdr.compacted) {
-        PktHdr* hdr =
-            (PktHdr*)((char*)handle.packet_buf + (with_grh ? kGRHSize : 0));
-        handle.wnd = le16toh(hdr->wnd);
-        handle.ts = (uint64_t(le32toh(hdr->ts_hi)) << 16) | le16toh(hdr->ts_lo);
-        handle.remote_addr = le64toh(hdr->remote_addr);
-    }
-    handle.session = pkt_hdr.session;
-    handle.cmd = pkt_hdr.cmd;
-    handle.compacted = pkt_hdr.compacted ? true : false;
-    handle.sn = pkt_hdr.sn[0] | (uint32_t(pkt_hdr.sn[1]) << 8) |
-                (uint32_t(pkt_hdr.sn[2]) << 16);
-    handle.data_buf = nullptr;
-    return 0;
-}
+// ========== Packet Buffer Pool ==========
 
 PacketBufferPool::PacketBufferPool(size_t mtu_size, size_t max_packets)
     : mtu_size_(mtu_size),
@@ -195,9 +30,7 @@ int PacketBufferPool::construct(const std::string& device_name) {
     if (!device_name.empty()) {
         char path[PATH_MAX + 32];
         char resolved_path[PATH_MAX];
-        // Get the PCI bus id for the infiniband device. Note that
-        // "/sys/class/infiniband/mlx5_X/" is a symlink to
-        // "/sys/devices/pciXXXX:XX/XXXX:XX:XX.X/infiniband/mlx5_X/".
+        // Get the PCI bus id for the infiniband device
         snprintf(path, sizeof(path), "/sys/class/infiniband/%s/../..",
                  device_name.c_str());
         if (realpath(path, resolved_path)) {
@@ -206,17 +39,24 @@ int PacketBufferPool::construct(const std::string& device_name) {
             std::ifstream(path) >> socket_id;
         }
     }
+
+    // Allocate memory on specific NUMA node
     arena_ = numa_alloc_onnode(mtu_size_ * max_packets_, socket_id);
-    // int ret = posix_memalign(&arena_, 4096, mtu_size_ * max_packets_);
-    // if (ret) {
-    //     PLOG(ERROR) << "posix_memalign failed";
-    //     return ret;
-    // }
+    if (!arena_) {
+        LOG(ERROR) << "[PacketBufferPool] Failed to allocate arena";
+        return -1;
+    }
+
+    // Initialize free list (linked list through packet buffers)
     for (size_t index = 0; index < max_packets_; ++index) {
-        uint8_t* ptr = (uint8_t*)arena_ + mtu_size_ * index;
-        *(uintptr_t*)ptr = (uintptr_t)global_free_buffer_;
+        uint8_t* ptr = static_cast<uint8_t*>(arena_) + mtu_size_ * index;
+        *reinterpret_cast<uintptr_t*>(ptr) = reinterpret_cast<uintptr_t>(global_free_buffer_);
         global_free_buffer_ = ptr;
     }
+
+    LOG(INFO) << "[PacketBufferPool] Allocated " << max_packets_
+              << " packets of " << mtu_size_ << " bytes on socket " << socket_id;
+
     return 0;
 }
 
@@ -224,157 +64,44 @@ int PacketBufferPool::deconstruct() {
     if (arena_) {
         numa_free(arena_, mtu_size_ * max_packets_);
         arena_ = nullptr;
+        global_free_buffer_ = nullptr;
     }
     return 0;
 }
 
 int PacketBufferPool::allocatePacket(PacketHandle& handle, bool with_grh) {
-    // RWSpinlock::WriteGuard guard(arena_lock_);
+    // Note: RWSpinlock could be used here for thread safety
+    // For now, assuming single-threaded allocation or external locking
+
     void* packet_buf = global_free_buffer_;
     if (!packet_buf) {
+        LOG(WARNING) << "[PacketBufferPool] No free packets available";
         return -1;
     }
-    uintptr_t next = *(uintptr_t*)packet_buf;
-    global_free_buffer_ = (void*)next;
+
+    // Pop from free list
+    uintptr_t next = *reinterpret_cast<uintptr_t*>(packet_buf);
+    global_free_buffer_ = reinterpret_cast<void*>(next);
+
     return handle.setRawPacket(packet_buf, with_grh);
 }
 
 int PacketBufferPool::freePacket(PacketHandle& handle) {
-    // RWSpinlock::WriteGuard guard(arena_lock_);
     auto packet_buf = handle.packet_buf;
     if (!packet_buf) {
-        LOG(ERROR) << "invalid packet handle";
+        LOG(ERROR) << "[PacketBufferPool] Invalid packet handle";
         return -1;
     }
-    *(uintptr_t*)packet_buf = (uintptr_t)global_free_buffer_;
+
+    // Push to free list
+    *reinterpret_cast<uintptr_t*>(packet_buf) = reinterpret_cast<uintptr_t>(global_free_buffer_);
     global_free_buffer_ = packet_buf;
+
+    // Clear handle
+    handle.packet_buf = nullptr;
+    handle.data_len = 0;
+
     return 0;
-}
-
-SendQueue::SendQueue(size_t mtu_size, size_t queue_capacity, size_t wnd_size,
-                     PacketBufferPool& pool, uint8_t session)
-    : mtu_size_(mtu_size),
-      queue_capacity_(queue_capacity),
-      session_(session),
-      head_(0),
-      tail_(0),
-      wnd_size_(wnd_size),
-      pool_(pool),
-      secondary_queue_(mtu_size - sizeof(PktHdr) - kGRHSize) {
-    assert(wnd_size <= queue_capacity);
-    handle_.resize(queue_capacity);
-}
-
-SendQueue::~SendQueue() {
-    for (auto& entry : handle_) {
-        if (entry.getPayload()) {
-            pool_.freePacket(entry);
-        }
-    }
-    handle_.clear();
-}
-
-int SendQueue::push(const std::vector<Buffer>& slice_list, uint32_t& last_sn) {
-    // RWSpinlock::WriteGuard guard(queue_lock_);
-    auto fragment_id = secondary_queue_.push(slice_list);
-    last_sn = SHORT_SN(fragment_id.second);
-    return fillPrimaryQueue();
-}
-
-int SendQueue::push(const std::vector<Buffer>& slice_list, uint32_t& last_sn,
-                    const std::vector<Buffer>& remote_targets) {
-    // RWSpinlock::WriteGuard guard(queue_lock_);
-    auto fragment_id = secondary_queue_.push(slice_list, remote_targets);
-    last_sn = SHORT_SN(fragment_id.second);
-    return fillPrimaryQueue();
-}
-
-int SendQueue::markCompleted(uint32_t ack_sn) {
-    // RWSpinlock::WriteGuard guard(queue_lock_);
-    // case 1: XXX tail_ ... ack_sn ... head_ XXX
-    // case 2: ... ack_sn ... head  XXX tail ...
-    auto tail = SHORT_SN(tail_), head = SHORT_SN(head_);
-    if (tail <= head && tail <= ack_sn && ack_sn <= head)
-        tail_ = tail_ + (ack_sn - tail);
-    else if (tail > head && ack_sn <= head)
-        tail_ = head_ - (head - ack_sn);
-    else if (tail > head && ack_sn >= tail)
-        tail_ = tail_ + (ack_sn - tail);
-    return fillPrimaryQueue();
-}
-
-int SendQueue::fillPrimaryQueue() {
-    while (secondary_queue_.hasRemainingFragment() &&
-           head_ - tail_ <= wnd_size_) {
-        auto& handle = handle_[head_ % queue_capacity_];
-        if (!handle.getRawPacket() && pool_.allocatePacket(handle)) return 0;
-        auto slice = secondary_queue_.popFragment();
-        handle.session = session_;
-        handle.cmd = PKT_CMD_DATA;
-        handle.wnd = wnd_size_;
-        handle.sn = SHORT_SN(head_);
-        handle.ts = 0;
-        handle.remote_addr = reinterpret_cast<uint64_t>(slice.remote_addr);
-        if (handle.setPayload(slice.local_addr, slice.length, false)) return -1;
-        handle.inflight = true;
-        head_++;
-    }
-    return 0;
-}
-
-int SendQueue::getIndexRange(uint64_t& head, uint64_t& tail) {
-    // RWSpinlock::ReadGuard guard(queue_lock_);
-    head = head_;
-    tail = tail_;
-    return 0;
-}
-
-int SendQueue::forEach(std::function<int(PacketHandle&)> func) {
-    // RWSpinlock::ReadGuard guard(queue_lock_);
-    for (auto curr = tail_.load(); curr != head_.load(); curr++) {
-        auto& handle = handle_[curr % queue_capacity_];
-        func(handle);
-    }
-    return 0;
-}
-
-PacketManager::PacketManager(size_t mtu_size, size_t max_packets,
-                             size_t queue_capacity, size_t wnd_size)
-    : mtu_size_(mtu_size),
-      max_packets_(max_packets),
-      queue_capacity_(queue_capacity),
-      wnd_size_(wnd_size),
-      pool_(mtu_size, max_packets) {}
-
-PacketManager::~PacketManager() { deconstruct(); }
-
-int PacketManager::construct(const std::string& device_name) {
-    return pool_.construct(device_name);
-}
-
-int PacketManager::deconstruct() {
-    for (auto& entry : send_queue_) delete entry.second;
-    send_queue_.clear();
-    return pool_.deconstruct();
-}
-
-SendQueue& PacketManager::getSendQueue(int sid) {
-    queue_lock_.lockShared();
-    if (send_queue_.count(sid)) {
-        auto& entry = send_queue_[sid];
-        queue_lock_.unlockShared();
-        return *entry;
-    }
-    queue_lock_.unlockShared();
-    queue_lock_.lock();
-    if (!send_queue_.count(sid)) {
-        auto entry = new SendQueue(mtu_size_, queue_capacity_, wnd_size_, pool_,
-                                   sid % 256);
-        send_queue_[sid] = entry;
-    }
-    auto& entry = send_queue_[sid];
-    queue_lock_.unlock();
-    return *entry;
 }
 
 }  // namespace rapid

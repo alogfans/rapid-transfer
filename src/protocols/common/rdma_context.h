@@ -1,5 +1,5 @@
 // rdma_context.h
-// Copyright (C) 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #ifndef RDMA_CONTEXT_H
 #define RDMA_CONTEXT_H

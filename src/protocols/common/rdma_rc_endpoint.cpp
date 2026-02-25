@@ -1,5 +1,5 @@
 // rdma_rc_endpoint.cpp
-// Copyright (C) 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #include "rdma_rc_endpoint.h"
 

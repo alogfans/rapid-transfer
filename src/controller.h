@@ -1,4 +1,4 @@
-// Copyright 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #ifndef CONTROLLER_H_
 #define CONTROLLER_H_

@@ -1,5 +1,5 @@
 // rdma_ud_endpoint_store.h
-// Copyright (C) 2024 Feng Ren
+// Copyright (C) 2026 RapidXfer Team
 
 #ifndef RDMA_UD_ENDPOINT_STORE_H
 #define RDMA_UD_ENDPOINT_STORE_H
