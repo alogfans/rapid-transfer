@@ -113,11 +113,6 @@ int Controller::prepareConnection(const std::string& peer_addr,
     local["lid"] = std::to_string(context_.lid());
     local["gid"] = context_.gid();
     local["qp"] = ToString(endpoint->qpNum());
-    std::vector<uint32_t> ext_qp_num_list = endpoint->qpNum();
-    for (auto& entry : getMulticastContextMap()) {
-        entry.second->qpNum(ext_qp_num_list);
-    }
-    local["ext_qp"] = ToString(ext_qp_num_list);
     return 0;
 }
 
@@ -125,15 +120,13 @@ int Controller::setupConnection(const std::string& peer_addr,
                                 const Attributes& peer) {
     auto endpoint = endpoint_store_.getOrCreateEndpoint(peer_addr);
     if (!endpoint) return -1;
-    if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp") ||
-        !peer.count("ext_qp")) {
+    if (!peer.count("lid") || !peer.count("gid") || !peer.count("qp")) {
         LOG(ERROR) << "invalid peer attributes";
         return -1;
     }
     auto lid = (uint16_t)std::stoi(peer.at("lid"));
     auto gid = peer.at("gid");
     auto qp_num_list = FromString(peer.at("qp"));
-    auto ext_qp_num_list = FromString(peer.at("ext_qp"));
     int ret = endpoint->setupConnection(gid, lid, qp_num_list);
     if (ret) return ret;
 
@@ -145,7 +138,7 @@ int Controller::setupConnection(const std::string& peer_addr,
         gid_raw.raw[i] = static_cast<uint8_t>(value);
         if (i < 15) iss.ignore(1, ':');
     }
-    registerNode(peer_addr, gid_raw, ext_qp_num_list);
+    registerNode(peer_addr, gid_raw, qp_num_list);
     return 0;
 }
 

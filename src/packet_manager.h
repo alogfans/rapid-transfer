@@ -66,10 +66,6 @@ class PacketHandle {
     void* packet_buf{nullptr};
     uint32_t data_len{0};
     bool with_grh{false};
-
-   private:
-    int encode() { return 0; }
-    int decode() { return 0; }
 };
 
 // ========== Packet Buffer Pool ==========

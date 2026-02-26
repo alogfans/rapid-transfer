@@ -6,13 +6,16 @@
 
 #include "context.h"
 
-#include "protocols/common/rdma_ud_endpoint.h"
-
 #include <arpa/inet.h>
 #include <glog/logging.h>
-#include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
+
+#include <cstring>
+#include <sstream>
+
+#include "protocols/common/rdma_ud_endpoint.h"
 
 namespace rapid {
 
@@ -28,15 +31,12 @@ Context::Context(size_t mtu_size, size_t max_packets, size_t queue_capacity)
     : mtu_size_(mtu_size),
       packet_manager_(mtu_size, max_packets, queue_capacity),
       next_task_id_(0) {
-
     // Create scheduler
-    rapidxfer::SchedulerConfig config;
-    scheduler_ = std::make_unique<rapidxfer::Scheduler>(config);
+    rapid::v1::SchedulerConfig config;
+    scheduler_ = std::make_unique<rapid::v1::Scheduler>(config);
 }
 
-Context::~Context() {
-    deconstruct();
-}
+Context::~Context() { deconstruct(); }
 
 int Context::construct(const std::string& device_name, uint8_t rdma_port,
                        int gid_index) {
@@ -81,11 +81,13 @@ int Context::deconstruct() {
 
 // ========== Connection Management ==========
 
-int Context::prepareConnection(const std::string& peer_addr, Attributes& local) {
+int Context::prepareConnection(const std::string& peer_addr,
+                               Attributes& local) {
     return controller_.prepareConnection(peer_addr, local);
 }
 
-int Context::setupConnection(const std::string& peer_addr, const Attributes& peer) {
+int Context::setupConnection(const std::string& peer_addr,
+                             const Attributes& peer) {
     return controller_.setupConnection(peer_addr, peer);
 }
 
@@ -101,25 +103,27 @@ int Context::unregisterLocalMemory(void* addr) {
 // ========== Unified Message Sending ==========
 
 int Context::sendDataPacket(const std::string& peer_name,
-                            const rapidxfer::RapidXferHeader& rx_header,
+                            const rapid::v1::RapidTransferHeader& rx_header,
                             const std::vector<uint8_t>& payload) {
-
     // Get or create session
-    int session_id = scheduler_->getOrCreateSession(peer_name);
-    auto* session = scheduler_->getSession(session_id);
+    auto* session = scheduler_->getOrCreateSession(peer_name);
     if (!session) {
         LOG(ERROR) << "[Context] Failed to get session for " << peer_name;
         return -1;
     }
 
+    int session_id = session->session_id;
+
     // Acquire QP if needed
     if (session->bound_qp_id < 0) {
         int qp_id = scheduler_->acquireQP(session_id);
         if (qp_id < 0) {
-            LOG(WARNING) << "[Context] No available QP for session " << session_id;
+            LOG(WARNING) << "[Context] No available QP for session "
+                         << session_id;
             return -1;  // TODO: Queue for later retry
         }
-        LOG(INFO) << "[Context] Bound QP " << qp_id << " to session " << session_id;
+        LOG(INFO) << "[Context] Bound QP " << qp_id << " to session "
+                  << session_id;
     }
 
     // Allocate packet handle
@@ -131,28 +135,17 @@ int Context::sendDataPacket(const std::string& peer_name,
         return -1;
     }
 
-    // Build packet with RapidXfer header + payload
+    // Build packet with RapidXfer header
     uint8_t* packet_buf = static_cast<uint8_t*>(handle.getRawPacket());
-    size_t total_size = sizeof(rapidxfer::RapidXferHeader) + payload.size();
-
-    if (total_size > mtu_size_) {
-        LOG(ERROR) << "[Context] Packet size " << total_size << " exceeds MTU " << mtu_size_;
-        pool.freePacket(handle);
-        return -1;
-    }
 
     // Copy header
-    memcpy(packet_buf, &rx_header, sizeof(rapidxfer::RapidXferHeader));
-
-    // Copy payload (if any)
-    if (!payload.empty()) {
-        memcpy(packet_buf + sizeof(rapidxfer::RapidXferHeader), payload.data(), payload.size());
-    }
+    memcpy(packet_buf, &rx_header, sizeof(rapid::v1::RapidTransferHeader));
 
     // Get endpoint
     auto endpoint = controller_.getOrCreateEndpoint(session_id);
     if (!endpoint) {
-        LOG(ERROR) << "[Context] Failed to get endpoint for session " << session_id;
+        LOG(ERROR) << "[Context] Failed to get endpoint for session "
+                   << session_id;
         pool.freePacket(handle);
         return -1;
     }
@@ -160,11 +153,50 @@ int Context::sendDataPacket(const std::string& peer_name,
     // Create and post send request
     Request req;
     req.addr[0] = packet_buf;
-    req.length[0] = total_size;
+    req.length[0] = sizeof(rapid::v1::RapidTransferHeader);
     req.lkey[0] = local_arena_lkey_;
-    req.addr[1] = nullptr;
-    req.length[1] = 0;
-    req.lkey[1] = 0;
+
+    // Handle payload - check if memory is pre-registered
+    if (!payload.empty()) {
+        auto [lkey, rkey] =
+            controller_.context().key(const_cast<uint8_t*>(payload.data()));
+        if (lkey != 0) {
+            // Payload memory is pre-registered, use addr[1] directly
+            // (zero-copy)
+            req.addr[1] = const_cast<uint8_t*>(payload.data());
+            req.length[1] = payload.size();
+            req.lkey[1] = lkey;
+            LOG(INFO) << "[Context] Using zero-copy for payload: addr="
+                      << req.addr[1] << ", size=" << payload.size();
+        } else {
+            // Payload memory not registered, fallback to memcpy
+            if (sizeof(rapid::v1::RapidTransferHeader) + payload.size() >
+                mtu_size_) {
+                LOG(ERROR) << "[Context] Packet size exceeds MTU " << mtu_size_;
+                pool.freePacket(handle);
+                return -1;
+            }
+            memcpy(packet_buf + sizeof(rapid::v1::RapidTransferHeader),
+                   payload.data(), payload.size());
+            req.length[0] += payload.size();
+            req.addr[1] = nullptr;
+            req.length[1] = 0;
+            req.lkey[1] = 0;
+        }
+    } else {
+        req.addr[1] = nullptr;
+        req.length[1] = 0;
+        req.lkey[1] = 0;
+    }
+
+    // Validate total size
+    size_t total_size = req.length[0] + req.length[1];
+    if (total_size > mtu_size_) {
+        LOG(ERROR) << "[Context] Packet size " << total_size << " exceeds MTU "
+                   << mtu_size_;
+        pool.freePacket(handle);
+        return -1;
+    }
 
     std::vector<Request*> requests = {&req};
     int send_ret = endpoint->postSendRequest(requests);
@@ -179,8 +211,8 @@ int Context::sendDataPacket(const std::string& peer_name,
     // For now, just mark as inflight
     handle.inflight = true;
 
-    LOG(INFO) << "[Context] Sent packet to " << peer_name
-              << ", flags=0x" << std::hex << rx_header.flags << std::dec
+    LOG(INFO) << "[Context] Sent packet to " << peer_name << ", flags=0x"
+              << std::hex << rx_header.flags << std::dec
               << ", size=" << total_size;
 
     return 0;
@@ -189,15 +221,14 @@ int Context::sendDataPacket(const std::string& peer_name,
 int Context::sendReadRequest(const std::string& peer_name,
                              const std::vector<Buffer>& local_targets,
                              const std::vector<Buffer>& remote_sources) {
-
     LOG(INFO) << "[Context] Sending read request to " << peer_name;
 
     // Build header with READ_REQUEST flag
-    rapidxfer::RapidXferHeader header;
+    rapid::v1::RapidTransferHeader header;
     header.session_id = 0;
     header.chunk_id = 0;
     header.seq_num = 0;
-    header.flags = rapidxfer::READ_REQUEST;
+    header.flags = rapid::v1::READ_REQUEST;
     header.timestamp = GetCurrentTS();
 
     // Build payload
@@ -206,8 +237,8 @@ int Context::sendReadRequest(const std::string& peer_name,
     uint32_t num_remote = remote_sources.size();
 
     // Reserve space
-    size_t payload_size = sizeof(uint32_t) * 2 + 
-                          sizeof(Buffer) * (num_local + num_remote);
+    size_t payload_size =
+        sizeof(uint32_t) * 2 + sizeof(Buffer) * (num_local + num_remote);
     payload.resize(payload_size);
     uint8_t* ptr = payload.data();
 
@@ -223,47 +254,45 @@ int Context::sendReadRequest(const std::string& peer_name,
     return sendDataPacket(peer_name, header, payload);
 }
 
-int Context::sendSACK(const std::string& peer_name,
-                      uint32_t session_id, uint32_t chunk_id,
-                      uint64_t recv_bitmap, uint16_t bitmap_start) {
-
-    rapidxfer::RapidXferHeader header;
+int Context::sendSACK(const std::string& peer_name, uint32_t session_id,
+                      uint32_t chunk_id, uint64_t recv_bitmap,
+                      uint16_t bitmap_start) {
+    rapid::v1::RapidTransferHeader header;
     header.session_id = session_id;
     header.chunk_id = chunk_id;
     header.seq_num = 0;
-    header.flags = rapidxfer::SACK;
+    header.flags = rapid::v1::SACK;
     header.timestamp = GetCurrentTS();
 
-    rapidxfer::SACKPayload sack;
+    rapid::v1::SACKPayload sack;
     sack.recv_bitmap = recv_bitmap;
     sack.bitmap_start = bitmap_start;
 
-    std::vector<uint8_t> payload(sizeof(rapidxfer::SACKPayload));
-    memcpy(payload.data(), &sack, sizeof(rapidxfer::SACKPayload));
+    std::vector<uint8_t> payload(sizeof(rapid::v1::SACKPayload));
+    memcpy(payload.data(), &sack, sizeof(rapid::v1::SACKPayload));
 
-    LOG(INFO) << "[Context] Sending SACK to " << peer_name
-              << ", bitmap=0x" << std::hex << recv_bitmap << std::dec;
+    LOG(INFO) << "[Context] Sending SACK to " << peer_name << ", bitmap=0x"
+              << std::hex << recv_bitmap << std::dec;
 
     return sendDataPacket(peer_name, header, payload);
 }
 
-int Context::sendChunkAck(const std::string& peer_name,
-                         uint32_t session_id, uint32_t chunk_id,
-                         uint32_t total_pkts, uint64_t recv_bitmap) {
-
-    rapidxfer::RapidXferHeader header;
+int Context::sendChunkAck(const std::string& peer_name, uint32_t session_id,
+                          uint32_t chunk_id, uint32_t total_pkts,
+                          uint64_t recv_bitmap) {
+    rapid::v1::RapidTransferHeader header;
     header.session_id = session_id;
     header.chunk_id = chunk_id;
     header.seq_num = 0;
-    header.flags = rapidxfer::CHUNK_ACK;
+    header.flags = rapid::v1::CHUNK_ACK;
     header.timestamp = GetCurrentTS();
 
-    rapidxfer::ChunkAckPayload ack;
+    rapid::v1::ChunkAckPayload ack;
     ack.total_pkts = total_pkts;
     ack.recv_bitmap = recv_bitmap;
 
-    std::vector<uint8_t> payload(sizeof(rapidxfer::ChunkAckPayload));
-    memcpy(payload.data(), &ack, sizeof(rapidxfer::ChunkAckPayload));
+    std::vector<uint8_t> payload(sizeof(rapid::v1::ChunkAckPayload));
+    memcpy(payload.data(), &ack, sizeof(rapid::v1::ChunkAckPayload));
 
     LOG(INFO) << "[Context] Sending Chunk-ACK to " << peer_name
               << ", chunk=" << chunk_id;
@@ -271,10 +300,8 @@ int Context::sendChunkAck(const std::string& peer_name,
     return sendDataPacket(peer_name, header, payload);
 }
 
-int Context::sendNotification(const std::string& peer_name,
-                              TaskID task_id,
+int Context::sendNotification(const std::string& peer_name, TaskID task_id,
                               const std::string& message) {
-
     // Truncate message if too long
     std::string truncated_msg = message;
     if (truncated_msg.size() > 255) {
@@ -283,18 +310,18 @@ int Context::sendNotification(const std::string& peer_name,
     }
 
     // Build notification payload
-    rapidxfer::NotificationPayload notif;
+    rapid::v1::NotificationPayload notif;
     notif.task_id = task_id;
     notif.message_length = truncated_msg.size();
     memcpy(notif.message, truncated_msg.c_str(), truncated_msg.size());
     notif.message[truncated_msg.size()] = '\0';
 
     // Build header
-    rapidxfer::RapidXferHeader header;
+    rapid::v1::RapidTransferHeader header;
     header.session_id = 0;  // Notifications are not session-specific
     header.chunk_id = 0;
     header.seq_num = 0;
-    header.flags = rapidxfer::NOTIFICATION;
+    header.flags = rapid::v1::NOTIFICATION;
     header.timestamp = GetCurrentTS();
 
     // Serialize payload
@@ -302,8 +329,7 @@ int Context::sendNotification(const std::string& peer_name,
     memcpy(payload.data(), &notif, sizeof(notif));
 
     LOG(INFO) << "[Context] Sending notification to " << peer_name
-              << ", task_id=" << task_id
-              << ", message=" << truncated_msg;
+              << ", task_id=" << task_id << ", message=" << truncated_msg;
 
     return sendDataPacket(peer_name, header, payload);
 }
@@ -311,9 +337,8 @@ int Context::sendNotification(const std::string& peer_name,
 // ========== Write Operations ==========
 
 TaskID Context::startWrite(const std::string& peer_name,
-                            const std::vector<Buffer>& local_buffers,
-                            const std::vector<Buffer>& remote_buffers) {
-
+                           const std::vector<Buffer>& local_buffers,
+                           const std::vector<Buffer>& remote_buffers) {
     LOG(INFO) << "[Context] Starting write to " << peer_name
               << ", buffers=" << local_buffers.size();
 
@@ -324,15 +349,16 @@ TaskID Context::startWrite(const std::string& peer_name,
     }
 
     // Get or create session
-    int session_id = scheduler_->getOrCreateSession(peer_name);
-    auto* session = scheduler_->getSession(session_id);
+    auto* session = scheduler_->getOrCreateSession(peer_name);
     if (!session) {
         LOG(ERROR) << "[Context] Failed to get session";
         return -1;
     }
 
+    int session_id = session->session_id;
+
     // Initialize session for sending
-    session->state = rapidxfer::VirtualSession::State::SENDING;
+    session->state = rapid::v1::VirtualSession::State::SENDING;
     session->local_buffers = local_buffers;
     session->remote_buffers = remote_buffers;
     session->next_chunk_id = 0;
@@ -350,12 +376,12 @@ TaskID Context::startWrite(const std::string& peer_name,
     // Calculate total chunks and packets
     size_t total_chunks = (total_bytes + kChunkSize - 1) / kChunkSize;
 
-    session->total_pkts_in_chunk = std::min((size_t)kWindowPackets,
-                                            (total_bytes + kMaxDataPerPkt - 1) / kMaxDataPerPkt);
+    session->total_pkts_in_chunk =
+        std::min((size_t)kWindowPackets,
+                 (total_bytes + kMaxDataPerPkt - 1) / kMaxDataPerPkt);
 
     LOG(INFO) << "[Context] Write task " << task_id
-              << ", total_bytes=" << total_bytes
-              << ", chunks=" << total_chunks
+              << ", total_bytes=" << total_bytes << ", chunks=" << total_chunks
               << ", first_chunk_pkts=" << session->total_pkts_in_chunk;
 
     // Start sending first chunk
@@ -367,7 +393,6 @@ TaskID Context::startWrite(const std::string& peer_name,
 TaskID Context::startRead(const std::string& peer_name,
                           const std::vector<Buffer>& local_targets,
                           const std::vector<Buffer>& remote_sources) {
-
     LOG(INFO) << "[Context] Starting read from " << peer_name
               << ", buffers=" << local_targets.size();
 
@@ -378,15 +403,16 @@ TaskID Context::startRead(const std::string& peer_name,
     }
 
     // Get or create session
-    int session_id = scheduler_->getOrCreateSession(peer_name);
-    auto* session = scheduler_->getSession(session_id);
+    auto* session = scheduler_->getOrCreateSession(peer_name);
     if (!session) {
         LOG(ERROR) << "[Context] Failed to get session";
         return -1;
     }
 
+    int session_id = session->session_id;
+
     // Initialize session for receiving
-    session->state = rapidxfer::VirtualSession::State::RECEIVING;
+    session->state = rapid::v1::VirtualSession::State::RECEIVING;
     session->local_buffers = local_targets;
     session->remote_buffers = remote_sources;
     session->recv_bitmap = 0;
@@ -403,8 +429,8 @@ TaskID Context::startRead(const std::string& peer_name,
     uint32_t num_local = local_targets.size();
     uint32_t num_remote = remote_sources.size();
 
-    size_t payload_size = sizeof(uint32_t) * 2 +
-                          sizeof(Buffer) * (num_local + num_remote);
+    size_t payload_size =
+        sizeof(uint32_t) * 2 + sizeof(Buffer) * (num_local + num_remote);
     std::vector<uint8_t> payload(payload_size);
 
     uint8_t* ptr = payload.data();
@@ -417,11 +443,11 @@ TaskID Context::startRead(const std::string& peer_name,
     memcpy(ptr, remote_sources.data(), sizeof(Buffer) * num_remote);
 
     // Build Read Request packet
-    rapidxfer::RapidXferHeader header;
+    rapid::v1::RapidTransferHeader header;
     header.session_id = session_id;
     header.chunk_id = 0;
     header.seq_num = 0;
-    header.flags = rapidxfer::READ_REQUEST;
+    header.flags = rapid::v1::READ_REQUEST;
     header.timestamp = GetCurrentTS();
 
     // Send Read Request
@@ -450,8 +476,8 @@ int Context::sendChunkPackets(int session_id, uint32_t chunk_id) {
 
     // Calculate current position in buffers
     size_t bytes_offset = chunk_id * kChunkSize;
-    size_t chunk_bytes = std::min(kChunkSize,
-                                  session->total_pkts_in_chunk * kMaxDataPerPkt);
+    size_t chunk_bytes =
+        std::min(kChunkSize, session->total_pkts_in_chunk * kMaxDataPerPkt);
 
     // Find buffer and offset for current position
     size_t buf_idx = 0;
@@ -479,21 +505,24 @@ int Context::sendChunkPackets(int session_id, uint32_t chunk_id) {
 
     while (pkt_count < kWindowPackets && bytes_sent_in_chunk < chunk_bytes) {
         // Calculate packet size
-        size_t pkt_size = std::min(kMaxDataPerPkt, chunk_bytes - bytes_sent_in_chunk);
-        size_t remaining_in_buf = session->local_buffers[buf_idx].length - buf_offset;
+        size_t pkt_size =
+            std::min(kMaxDataPerPkt, chunk_bytes - bytes_sent_in_chunk);
+        size_t remaining_in_buf =
+            session->local_buffers[buf_idx].length - buf_offset;
         size_t copy_size = std::min(pkt_size, remaining_in_buf);
 
         // Build header
-        rapidxfer::RapidXferHeader header;
+        rapid::v1::RapidTransferHeader header;
         header.session_id = session_id;
         header.chunk_id = chunk_id;
         header.seq_num = session->next_seq_num++;
-        header.flags = rapidxfer::DATA_PACKET;
+        header.flags = rapid::v1::DATA_PACKET;
         header.timestamp = GetCurrentTS();
 
         // Build payload
         std::vector<uint8_t> payload(copy_size);
-        const uint8_t* src = static_cast<const uint8_t*>(session->local_buffers[buf_idx].addr);
+        const uint8_t* src =
+            static_cast<const uint8_t*>(session->local_buffers[buf_idx].addr);
         memcpy(payload.data(), src + buf_offset, copy_size);
 
         // Send packet
@@ -523,8 +552,9 @@ int Context::sendChunkPackets(int session_id, uint32_t chunk_id) {
     session->bytes_sent += bytes_sent_in_chunk;
     session->last_active_ts = GetCurrentTS();
 
-    LOG(INFO) << "[Context] Sent " << pkt_count << " packets for chunk " << chunk_id
-              << ", seq=" << seq_start << "-" << (session->next_seq_num - 1);
+    LOG(INFO) << "[Context] Sent " << pkt_count << " packets for chunk "
+              << chunk_id << ", seq=" << seq_start << "-"
+              << (session->next_seq_num - 1);
 
     return pkt_count;
 }
@@ -542,19 +572,21 @@ int Context::retransmitPackets(int session_id, uint32_t chunk_id) {
     }
 
     // Check if all packets are ACKed
-    if (session->send_bitmap == rapidxfer::kChunkCompleteMask) {
+    if (session->send_bitmap == rapid::v1::kChunkCompleteMask) {
         return 0;  // All packets ACKed, no retransmission needed
     }
 
     // Find packets that need retransmission (bits not set in send_bitmap)
-    uint16_t window_start = (session->next_seq_num > kWindowPackets) ?
-                            (session->next_seq_num - kWindowPackets) : 0;
+    uint16_t window_start = (session->next_seq_num > kWindowPackets)
+                                ? (session->next_seq_num - kWindowPackets)
+                                : 0;
 
     int retx_count = 0;
     const int kMaxRetxPerCall = 8;  // Limit retransmissions per call
 
     // Retransmit up to kMaxRetxPerCall missing packets
-    for (uint16_t i = 0; i < kWindowPackets && retx_count < kMaxRetxPerCall; ++i) {
+    for (uint16_t i = 0; i < kWindowPackets && retx_count < kMaxRetxPerCall;
+         ++i) {
         if (!(session->send_bitmap & (1ULL << i))) {
             // Packet at relative position i is not ACKed
             uint16_t seq_num = window_start + i;
@@ -579,31 +611,35 @@ int Context::retransmitPackets(int session_id, uint32_t chunk_id) {
             }
 
             if (buf_idx >= session->local_buffers.size()) {
-                LOG(WARNING) << "[Context] Invalid buffer index for retransmission";
+                LOG(WARNING)
+                    << "[Context] Invalid buffer index for retransmission";
                 continue;
             }
 
             // Calculate packet size
-            size_t remaining_in_buf = session->local_buffers[buf_idx].length - buf_offset;
+            size_t remaining_in_buf =
+                session->local_buffers[buf_idx].length - buf_offset;
             size_t pkt_size = std::min(kMaxDataPerPkt, remaining_in_buf);
 
             // Build header
-            rapidxfer::RapidXferHeader header;
+            rapid::v1::RapidTransferHeader header;
             header.session_id = session_id;
             header.chunk_id = chunk_id;
             header.seq_num = seq_num;
-            header.flags = rapidxfer::DATA_PACKET;
+            header.flags = rapid::v1::DATA_PACKET;
             header.timestamp = GetCurrentTS();
 
             // Build payload
             std::vector<uint8_t> payload(pkt_size);
-            const uint8_t* src = static_cast<const uint8_t*>(session->local_buffers[buf_idx].addr);
+            const uint8_t* src = static_cast<const uint8_t*>(
+                session->local_buffers[buf_idx].addr);
             memcpy(payload.data(), src + buf_offset, pkt_size);
 
             // Send packet
             int ret = sendDataPacket(session->peer_addr, header, payload);
             if (ret < 0) {
-                LOG(ERROR) << "[Context] Failed to retransmit packet seq=" << seq_num;
+                LOG(ERROR) << "[Context] Failed to retransmit packet seq="
+                           << seq_num;
             } else {
                 retx_count++;
                 LOG(INFO) << "[Context] Retransmitted seq=" << seq_num;
@@ -615,7 +651,8 @@ int Context::retransmitPackets(int session_id, uint32_t chunk_id) {
     recv_rto_ = std::min(recv_rto_ * 2, kMaxRTO);
     session->last_active_ts = now;
 
-    LOG(INFO) << "[Context] Retransmitted " << retx_count << " packets, RTO=" << recv_rto_;
+    LOG(INFO) << "[Context] Retransmitted " << retx_count
+              << " packets, RTO=" << recv_rto_;
 
     return retx_count;
 }
@@ -646,11 +683,10 @@ int Context::runStep() {
 // ========== Unified Message Handling ==========
 
 int Context::handlePacket(const std::string& peer_name,
-                          const rapidxfer::RapidXferHeader& header,
+                          const rapid::v1::RapidTransferHeader& header,
                           const std::vector<uint8_t>& payload) {
-
-    LOG(INFO) << "[Context] Received packet from " << peer_name
-              << ", flags=0x" << std::hex << header.flags << std::dec;
+    LOG(INFO) << "[Context] Received packet from " << peer_name << ", flags=0x"
+              << std::hex << header.flags << std::dec;
 
     if (header.isReadRequest()) {
         return handleReadRequest(peer_name, header, payload);
@@ -666,22 +702,21 @@ int Context::handlePacket(const std::string& peer_name,
 }
 
 int Context::handleDataPacket(const std::string& peer_name,
-                               const rapidxfer::RapidXferHeader& header,
-                               const std::vector<uint8_t>& payload) {
-
+                              const rapid::v1::RapidTransferHeader& header,
+                              const std::vector<uint8_t>& payload) {
     LOG(INFO) << "[Context] Data packet from " << peer_name
               << ", session=" << header.session_id
-              << ", chunk=" << header.chunk_id
-              << ", seq=" << header.seq_num
+              << ", chunk=" << header.chunk_id << ", seq=" << header.seq_num
               << ", size=" << payload.size();
 
     // Get or create session
-    int session_id = scheduler_->getOrCreateSession(peer_name);
-    auto* session = scheduler_->getSession(session_id);
+    auto* session = scheduler_->getOrCreateSession(peer_name);
     if (!session) {
         LOG(ERROR) << "[Context] Failed to get session";
         return -1;
     }
+
+    int session_id = session->session_id;
 
     // Initialize receive state for new chunk
     if (header.chunk_id != session->expected_chunk_id) {
@@ -689,7 +724,7 @@ int Context::handleDataPacket(const std::string& peer_name,
         session->recv_bitmap = 0;
         session->expected_chunk_id = header.chunk_id;
         session->expected_seq_num = 0;
-        session->state = rapidxfer::VirtualSession::State::RECEIVING;
+        session->state = rapid::v1::VirtualSession::State::RECEIVING;
     }
 
     // Check for duplicate packet
@@ -697,7 +732,8 @@ int Context::handleDataPacket(const std::string& peer_name,
     if (session->recv_bitmap & seq_bit) {
         LOG(INFO) << "[Context] Duplicate packet seq=" << header.seq_num;
         // Still send SACK for duplicate
-        sendSACK(peer_name, session_id, header.chunk_id, session->recv_bitmap, 0);
+        sendSACK(peer_name, session_id, header.chunk_id, session->recv_bitmap,
+                 0);
         return 0;
     }
 
@@ -707,8 +743,8 @@ int Context::handleDataPacket(const std::string& peer_name,
     // Write payload to local buffer
     if (!session->local_buffers.empty() && !payload.empty()) {
         // Calculate buffer position
-        size_t byte_offset = header.chunk_id * kChunkSize +
-                            header.seq_num * kMaxDataPerPkt;
+        size_t byte_offset =
+            header.chunk_id * kChunkSize + header.seq_num * kMaxDataPerPkt;
 
         // Find target buffer
         size_t buf_idx = 0;
@@ -726,28 +762,33 @@ int Context::handleDataPacket(const std::string& peer_name,
 
         if (buf_idx < session->local_buffers.size()) {
             // Copy payload to buffer
-            size_t copy_size = std::min(payload.size(),
-                                        session->local_buffers[buf_idx].length - buf_offset);
-            uint8_t* dst = static_cast<uint8_t*>(session->local_buffers[buf_idx].addr);
+            size_t copy_size =
+                std::min(payload.size(),
+                         session->local_buffers[buf_idx].length - buf_offset);
+            uint8_t* dst =
+                static_cast<uint8_t*>(session->local_buffers[buf_idx].addr);
             memcpy(dst + buf_offset, payload.data(), copy_size);
         }
     }
 
-    // Send SACK every few packets
-    static constexpr uint16_t kSackInterval = 8;
-    if (header.seq_num % kSackInterval == 0 || payload.size() < kMaxDataPerPkt) {
-        sendSACK(peer_name, session_id, header.chunk_id, session->recv_bitmap, 0);
+    // Send SACK every 64 packets
+    static constexpr uint16_t kSackInterval = 64;
+    if (header.seq_num % kSackInterval == 0 ||
+        payload.size() < kMaxDataPerPkt) {
+        sendSACK(peer_name, session_id, header.chunk_id, session->recv_bitmap,
+                 0);
     }
 
     // Check for chunk completion
-    // For now, assume chunk is complete if we've received packets covering the window
+    // For now, assume chunk is complete if we've received packets covering the
+    // window
     uint32_t pkts_received = __builtin_popcountll(session->recv_bitmap);
     if (pkts_received >= kWindowPackets || payload.size() < kMaxDataPerPkt) {
         // Chunk complete, send Chunk-ACK
-        sendChunkAck(peer_name, session_id, header.chunk_id,
-                     pkts_received, session->recv_bitmap);
+        sendChunkAck(peer_name, session_id, header.chunk_id, pkts_received,
+                     session->recv_bitmap);
 
-        session->state = rapidxfer::VirtualSession::State::COMPLETE;
+        session->state = rapid::v1::VirtualSession::State::COMPLETE;
         session->expected_chunk_id++;
 
         LOG(INFO) << "[Context] Chunk " << header.chunk_id << " complete";
@@ -757,9 +798,8 @@ int Context::handleDataPacket(const std::string& peer_name,
 }
 
 int Context::handleReadRequest(const std::string& peer_name,
-                               const rapidxfer::RapidXferHeader& header,
+                               const rapid::v1::RapidTransferHeader& header,
                                const std::vector<uint8_t>& payload) {
-
     LOG(INFO) << "[Context] Read request from " << peer_name;
 
     // Deserialize payload
@@ -799,13 +839,15 @@ int Context::handleReadRequest(const std::string& peer_name,
         if (now - it->second.timestamp < kDedupTTLUs) {
             // Within TTL, this is a duplicate
             if (it->second.completed) {
-                LOG(INFO) << "[Context] Duplicate read request (already completed), task_id="
-                      << it->second.task_id;
+                LOG(INFO) << "[Context] Duplicate read request (already "
+                             "completed), task_id="
+                          << it->second.task_id;
                 // Send notification that task is already complete
                 // The duplicate request will be ignored, data already sent
             } else {
-                LOG(INFO) << "[Context] Duplicate read request (in progress), task_id="
-                      << it->second.task_id;
+                LOG(INFO) << "[Context] Duplicate read request (in progress), "
+                             "task_id="
+                          << it->second.task_id;
             }
             return 0;  // Skip processing
         } else {
@@ -816,7 +858,8 @@ int Context::handleReadRequest(const std::string& peer_name,
 
     // Call read callback to let upper layer prepare data
     if (read_callback_) {
-        TaskID task_id = read_callback_(peer_name, local_targets, remote_sources);
+        TaskID task_id =
+            read_callback_(peer_name, local_targets, remote_sources);
         LOG(INFO) << "[Context] Read request assigned task_id=" << task_id;
 
         // Add to deduplication cache
@@ -828,8 +871,7 @@ int Context::handleReadRequest(const std::string& peer_name,
         // Now we send it as a write operation to the peer
 
         // Get or create session for the peer
-        int session_id = scheduler_->getOrCreateSession(peer_name);
-        auto* session = scheduler_->getSession(session_id);
+        auto* session = scheduler_->getOrCreateSession(peer_name);
         if (!session) {
             LOG(ERROR) << "[Context] Failed to get session for read response";
             return -1;
@@ -852,20 +894,19 @@ int Context::handleReadRequest(const std::string& peer_name,
 }
 
 int Context::handleSACK(const std::string& peer_name,
-                       const rapidxfer::RapidXferHeader& header,
-                       const std::vector<uint8_t>& payload) {
-
-    if (payload.size() < sizeof(rapidxfer::SACKPayload)) {
+                        const rapid::v1::RapidTransferHeader& header,
+                        const std::vector<uint8_t>& payload) {
+    if (payload.size() < sizeof(rapid::v1::SACKPayload)) {
         LOG(ERROR) << "[Context] Invalid SACK payload size";
         return -1;
     }
 
-    rapidxfer::SACKPayload sack;
-    memcpy(&sack, payload.data(), sizeof(rapidxfer::SACKPayload));
+    rapid::v1::SACKPayload sack;
+    memcpy(&sack, payload.data(), sizeof(rapid::v1::SACKPayload));
 
     LOG(INFO) << "[Context] SACK from " << peer_name
-              << ", chunk=" << header.chunk_id
-              << ", bitmap=0x" << std::hex << sack.recv_bitmap << std::dec;
+              << ", chunk=" << header.chunk_id << ", bitmap=0x" << std::hex
+              << sack.recv_bitmap << std::dec;
 
     // Get session
     auto* session = scheduler_->getSession(header.session_id);
@@ -885,8 +926,9 @@ int Context::handleSACK(const std::string& peer_name,
             recv_srtt_ = rtt_sample;
             recv_rttval_ = rtt_sample / 2;
         } else {
-            uint64_t rttvar_diff = (recv_srtt_ > rtt_sample) ?
-                                   (recv_srtt_ - rtt_sample) : (rtt_sample - recv_srtt_);
+            uint64_t rttvar_diff = (recv_srtt_ > rtt_sample)
+                                       ? (recv_srtt_ - rtt_sample)
+                                       : (rtt_sample - recv_srtt_);
             recv_rttval_ = (3 * recv_rttval_ + rttvar_diff) / 4;
             recv_srtt_ = (7 * recv_srtt_ + rtt_sample) / 8;
         }
@@ -914,13 +956,15 @@ int Context::handleSACK(const std::string& peer_name,
         for (uint16_t i = 0; i < kWindowPackets; ++i) {
             if (!(session->send_bitmap & (1ULL << i))) {
                 missing_count++;
-                LOG(INFO) << "[Context] Packet seq=" << (window_base + i) << " not ACKed";
+                LOG(INFO) << "[Context] Packet seq=" << (window_base + i)
+                          << " not ACKed";
             }
         }
 
         // Fast retransmit: if 3+ packets missing, retransmit immediately
         if (missing_count >= 3) {
-            LOG(INFO) << "[Context] Fast retransmit triggered for " << missing_count << " packets";
+            LOG(INFO) << "[Context] Fast retransmit triggered for "
+                      << missing_count << " packets";
             retransmitPackets(header.session_id, header.chunk_id);
         }
     }
@@ -931,7 +975,8 @@ int Context::handleSACK(const std::string& peer_name,
 
     // Check if all packets in chunk are ACKed
     if (acked_count >= session->total_pkts_in_chunk) {
-        LOG(INFO) << "[Context] All packets ACKed for chunk " << header.chunk_id;
+        LOG(INFO) << "[Context] All packets ACKed for chunk "
+                  << header.chunk_id;
 
         // Calculate total bytes to send
         size_t total_bytes = 0;
@@ -947,18 +992,20 @@ int Context::handleSACK(const std::string& peer_name,
             session->next_seq_num = 0;
             session->send_bitmap = 0;
 
-            LOG(INFO) << "[Context] Proceeding to chunk " << session->next_chunk_id;
+            LOG(INFO) << "[Context] Proceeding to chunk "
+                      << session->next_chunk_id;
 
             // Send next chunk
             sendChunkPackets(header.session_id, session->next_chunk_id);
         } else {
             // All data sent
-            session->state = rapidxfer::VirtualSession::State::COMPLETE;
-            LOG(INFO) << "[Context] All data sent for task " << session->task_id;
+            session->state = rapid::v1::VirtualSession::State::COMPLETE;
+            LOG(INFO) << "[Context] All data sent for task "
+                      << session->task_id;
 
             // Send Chunk-ACK to confirm completion
             sendChunkAck(session->peer_addr, header.session_id, header.chunk_id,
-                        session->total_pkts_in_chunk, session->send_bitmap);
+                         session->total_pkts_in_chunk, session->send_bitmap);
         }
     }
 
@@ -966,16 +1013,15 @@ int Context::handleSACK(const std::string& peer_name,
 }
 
 int Context::handleChunkAck(const std::string& peer_name,
-                          const rapidxfer::RapidXferHeader& header,
-                          const std::vector<uint8_t>& payload) {
-
-    if (payload.size() < sizeof(rapidxfer::ChunkAckPayload)) {
+                            const rapid::v1::RapidTransferHeader& header,
+                            const std::vector<uint8_t>& payload) {
+    if (payload.size() < sizeof(rapid::v1::ChunkAckPayload)) {
         LOG(ERROR) << "[Context] Invalid Chunk-ACK payload size";
         return -1;
     }
 
-    rapidxfer::ChunkAckPayload ack;
-    memcpy(&ack, payload.data(), sizeof(rapidxfer::ChunkAckPayload));
+    rapid::v1::ChunkAckPayload ack;
+    memcpy(&ack, payload.data(), sizeof(rapid::v1::ChunkAckPayload));
 
     LOG(INFO) << "[Context] Chunk-ACK from " << peer_name
               << ", chunk=" << header.chunk_id
@@ -993,7 +1039,7 @@ int Context::handleChunkAck(const std::string& peer_name,
     session->bytes_acked = ack.total_pkts * kMaxDataPerPkt;
     session->next_chunk_id = header.chunk_id + 1;
     session->next_seq_num = 0;  // Reset for next chunk
-    session->state = rapidxfer::VirtualSession::State::COMPLETE;
+    session->state = rapid::v1::VirtualSession::State::COMPLETE;
 
     // Update task result if this is the last chunk
     size_t total_bytes = 0;
@@ -1004,8 +1050,15 @@ int Context::handleChunkAck(const std::string& peer_name,
 
     if (bytes_in_chunk >= total_bytes) {
         // All data transferred
-        LOG(INFO) << "[Context] Transfer complete for task " << session->task_id;
-        session->state = rapidxfer::VirtualSession::State::COMPLETE;
+        LOG(INFO) << "[Context] Transfer complete for task "
+                  << session->task_id;
+        session->state = rapid::v1::VirtualSession::State::COMPLETE;
+
+        // Notify completion
+        if (transfer_complete_callback_) {
+            transfer_complete_callback_(session->task_id, peer_name,
+                                        Status::SUCCESS);
+        }
 
         // Release QP if idle
         if (session->bound_qp_id >= 0) {
@@ -1017,22 +1070,20 @@ int Context::handleChunkAck(const std::string& peer_name,
 }
 
 int Context::handleNotification(const std::string& peer_name,
-                               const rapidxfer::RapidXferHeader& header,
-                               const std::vector<uint8_t>& payload) {
-
-    if (payload.size() < sizeof(rapidxfer::NotificationPayload)) {
+                                const rapid::v1::RapidTransferHeader& header,
+                                const std::vector<uint8_t>& payload) {
+    if (payload.size() < sizeof(rapid::v1::NotificationPayload)) {
         LOG(ERROR) << "[Context] Invalid notification payload size";
         return -1;
     }
 
-    rapidxfer::NotificationPayload notif;
-    memcpy(&notif, payload.data(), sizeof(rapidxfer::NotificationPayload));
+    rapid::v1::NotificationPayload notif;
+    memcpy(&notif, payload.data(), sizeof(rapid::v1::NotificationPayload));
 
     std::string message(notif.message, notif.message_length);
 
     LOG(INFO) << "[Context] Notification from " << peer_name
-              << ", task_id=" << notif.task_id
-              << ", message=" << message;
+              << ", task_id=" << notif.task_id << ", message=" << message;
 
     if (notification_callback_) {
         notification_callback_(peer_name, notif.task_id, message);
@@ -1055,7 +1106,8 @@ int Context::pollCompletedPackets(int cq_index, uint64_t current_ts) {
 
     for (int i = 0; i < nr_poll; ++i) {
         if (wc[i].status != IBV_WC_SUCCESS) {
-            LOG(ERROR) << "[Context] Failed WC: " << ibv_wc_status_str(wc[i].status);
+            LOG(ERROR) << "[Context] Failed WC: "
+                       << ibv_wc_status_str(wc[i].status);
             continue;
         }
 
@@ -1077,21 +1129,24 @@ int Context::processReceivedPacket(uint64_t current_ts, ibv_wc& wc) {
         std::string peer_name = extractPeerName(grh, wc.src_qp);
 
         // Deserialize header
-        if (handle.getPayloadLength() < sizeof(rapidxfer::RapidXferHeader)) {
+        if (handle.getPayloadLength() <
+            sizeof(rapid::v1::RapidTransferHeader)) {
             LOG(ERROR) << "[Context] Packet too short for header";
             return -1;
         }
 
-        rapidxfer::RapidXferHeader header;
-        memcpy(&header, handle.getPayload(), sizeof(rapidxfer::RapidXferHeader));
+        rapid::v1::RapidTransferHeader header;
+        memcpy(&header, handle.getPayload(),
+               sizeof(rapid::v1::RapidTransferHeader));
 
         // Get payload (after header)
         const uint8_t* payload_start = (const uint8_t*)handle.getPayload() +
-                                         sizeof(rapidxfer::RapidXferHeader);
-        size_t payload_length = handle.getPayloadLength() -
-                                  sizeof(rapidxfer::RapidXferHeader);
+                                       sizeof(rapid::v1::RapidTransferHeader);
+        size_t payload_length =
+            handle.getPayloadLength() - sizeof(rapid::v1::RapidTransferHeader);
 
-        std::vector<uint8_t> payload(payload_start, payload_start + payload_length);
+        std::vector<uint8_t> payload(payload_start,
+                                     payload_start + payload_length);
 
         // Route to handler based on flags
         handlePacket(peer_name, header, payload);
@@ -1151,7 +1206,8 @@ int Context::sendDataPackets(uint64_t current_ts) {
             }
         }
         if (cleaned > 0) {
-            LOG(INFO) << "[Context] Cleaned " << cleaned << " expired dedup entries";
+            LOG(INFO) << "[Context] Cleaned " << cleaned
+                      << " expired dedup entries";
         }
         last_dedup_cleanup = current_ts;
     }
@@ -1166,8 +1222,6 @@ int Context::sendDataPackets(uint64_t current_ts) {
     return retx_count;
 }
 
-// ========== TCP Bootstrap ==========
-
 // ========== GID:QP to Peer Mapping ==========
 
 std::string Context::extractPeerName(ibv_grh* grh, uint32_t src_qp) {
@@ -1180,176 +1234,4 @@ std::string Context::extractPeerName(ibv_grh* grh, uint32_t src_qp) {
     return gid_str + ":" + std::to_string(src_qp);
 }
 
-// ========== TCP Bootstrap ==========
-
-int Context::startBootstrapListener(const std::string& tcp_address) {
-    // Parse address (e.g., "0.0.0.0:12348")
-    size_t colon_pos = tcp_address.find_last_of(':');
-    if (colon_pos == std::string::npos) {
-        LOG(ERROR) << "[Context] Invalid TCP address format: " << tcp_address;
-        return -1;
-    }
-
-    std::string host = tcp_address.substr(0, colon_pos);
-    std::string port_str = tcp_address.substr(colon_pos + 1);
-    int port = std::stoi(port_str);
-
-    // Create listening socket
-    tcp_listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (tcp_listen_fd_ < 0) {
-        LOG(ERROR) << "[Context] Failed to create TCP socket";
-        return -1;
-    }
-
-    // Set SO_REUSEADDR
-    int opt = 1;
-    setsockopt(tcp_listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    // Bind
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
-
-    if (bind(tcp_listen_fd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        LOG(ERROR) << "[Context] Failed to bind TCP socket";
-        close(tcp_listen_fd_);
-        tcp_listen_fd_ = -1;
-        return -1;
-    }
-
-    // Listen
-    if (listen(tcp_listen_fd_, 16) < 0) {
-        LOG(ERROR) << "[Context] Failed to listen on TCP socket";
-        close(tcp_listen_fd_);
-        tcp_listen_fd_ = -1;
-        return -1;
-    }
-
-    tcp_listen_address_ = tcp_address;
-    tcp_listener_running_ = true;
-
-    // Start accept thread
-    tcp_accept_thread_ = std::thread(&Context::bootstrapAcceptThread, this);
-
-    LOG(INFO) << "[Context] TCP Bootstrap listening on " << tcp_address;
-
-    return 0;
-}
-
-int Context::stopBootstrapListener() {
-    tcp_listener_running_ = false;
-
-    if (tcp_listen_fd_ >= 0) {
-        shutdown(tcp_listen_fd_, SHUT_RDWR);
-        close(tcp_listen_fd_);
-        tcp_listen_fd_ = -1;
-    }
-
-    if (tcp_accept_thread_.joinable()) {
-        tcp_accept_thread_.join();
-    }
-
-    LOG(INFO) << "[Context] TCP Bootstrap stopped";
-
-    return 0;
-}
-
-void Context::bootstrapAcceptThread() {
-    while (tcp_listener_running_) {
-        struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-
-        int client_fd = accept(tcp_listen_fd_, (struct sockaddr*)&client_addr, &addr_len);
-        if (client_fd < 0) {
-            if (tcp_listener_running_) {
-                LOG(ERROR) << "[Context] TCP accept failed";
-            }
-            break;
-        }
-
-        LOG(INFO) << "[Context] New TCP connection";
-
-        // Handle in a detached thread or synchronously
-        handleBootstrapConnection(client_fd);
-    }
-}
-
-void Context::handleBootstrapConnection(int client_fd) {
-    // Exchange UD connection information
-    // 1. Receive peer's UD info
-    // 2. Send local UD info
-    // 3. Close TCP
-
-    struct UDInfo {
-        uint32_t lid;
-        uint64_t gid[16];  // ibv_gid is 16 bytes
-        uint32_t qp_num;
-    } __attribute__((packed));
-
-    // Get local UD info
-    uint16_t local_lid = controller_.context().lid();
-    std::string local_gid_str = controller_.context().gid();
-
-    // Get local QP numbers from endpoint store
-    auto& endpoint_store = controller_.endpointStore();
-    auto qp_nums = endpoint_store.qpNum();
-
-    if (qp_nums.empty()) {
-        LOG(ERROR) << "[Context] No QPs available";
-        close(client_fd);
-        return;
-    }
-
-    // Receive peer's UD info first
-    UDInfo peer_info;
-    ssize_t ret = recv(client_fd, &peer_info, sizeof(peer_info), MSG_WAITALL);
-    if (ret != sizeof(peer_info)) {
-        LOG(ERROR) << "[Context] Failed to receive peer UD info";
-        close(client_fd);
-        return;
-    }
-
-    // Send local UD info
-    UDInfo local_info;
-    local_info.lid = local_lid;
-    // Convert gid string to bytes
-    memset(local_info.gid, 0, sizeof(local_info.gid));
-    if (local_gid_str.length() <= 32) {
-        memcpy(local_info.gid, local_gid_str.data(), local_gid_str.length());
-    }
-    local_info.qp_num = qp_nums[0];  // Send first QP number
-
-    ret = send(client_fd, &local_info, sizeof(local_info), 0);
-    if (ret != sizeof(local_info)) {
-        LOG(ERROR) << "[Context] Failed to send local UD info";
-        close(client_fd);
-        return;
-    }
-
-    // Create peer address string
-    char peer_gid_str[64];
-    for (int i = 0; i < 16; ++i) {
-        sprintf(&peer_gid_str[i * 2], "%02lx", (unsigned long)peer_info.gid[i]);
-    }
-    std::string peer_addr = std::string(peer_gid_str) + ":" + std::to_string(peer_info.qp_num);
-
-    // Prepare connection attributes for peer
-    Attributes peer_attrs;
-    peer_attrs["lid"] = std::to_string(peer_info.lid);
-    peer_attrs["gid"] = std::string(peer_gid_str, 32);
-    peer_attrs["qp_num"] = std::to_string(peer_info.qp_num);
-
-    // Setup UD connection
-    int setup_ret = setupConnection(peer_addr, peer_attrs);
-    if (setup_ret != 0) {
-        LOG(ERROR) << "[Context] Failed to setup UD connection to " << peer_addr;
-    } else {
-        LOG(INFO) << "[Context] Established UD connection to " << peer_addr;
-    }
-
-    close(client_fd);
-}
-
-} // namespace rapid
+}  // namespace rapid

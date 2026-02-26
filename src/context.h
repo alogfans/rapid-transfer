@@ -16,7 +16,7 @@
 #include "concurrency.h"
 #include "controller.h"
 #include "packet_manager.h"
-#include "rapidxfer_protocol.h"
+#include "rapid_transfer_protocol.h"
 #include "scheduler.h"
 #include "rapid_transfer.h"
 
@@ -37,6 +37,12 @@ public:
         const std::string& peer_name,
         TaskID task_id,
         const std::string& message)>;
+
+    // Callback for transfer completion
+    using TransferCompleteCallback = std::function<void(
+        TaskID task_id,
+        const std::string& peer_name,
+        Status status)>;
 
     // ========== Lifecycle ==========
 
@@ -60,7 +66,7 @@ public:
 
     // Send data packet (flags = DATA_PACKET)
     int sendDataPacket(const std::string& peer_name,
-                       const rapidxfer::RapidXferHeader& header,
+                       const rapid::v1::RapidTransferHeader& header,
                        const std::vector<uint8_t>& payload);
 
     // Send read request (flags = READ_REQUEST)
@@ -114,36 +120,65 @@ public:
     void setNotificationCallback(NotificationCallback callback) {
         notification_callback_ = std::move(callback);
     }
+    void setTransferCompleteCallback(TransferCompleteCallback callback) {
+        transfer_complete_callback_ = std::move(callback);
+    }
+
+    // ========== Buffer Info ==========
+
+    // Buffer info structure for sharing buffer information between peers
+    struct BufferInfo {
+        uint64_t addr;   // Buffer address as uint64_t for safe serialization
+        uint64_t length; // Buffer size
+        uint32_t rkey;   // Remote key
+    };
+
+    void setBufferInfo(const BufferInfo& info) {
+        std::lock_guard<std::mutex> lock(buffer_info_mutex_);
+        local_buffer_info_ = info;
+    }
+
+    std::optional<BufferInfo> getBufferInfo() const {
+        std::lock_guard<std::mutex> lock(buffer_info_mutex_);
+        return local_buffer_info_;
+    }
 
     // ========== Scheduler Access ==========
 
-    rapidxfer::Scheduler* getScheduler() { return scheduler_.get(); }
+    rapid::v1::Scheduler* getScheduler() { return scheduler_.get(); }
+
+    // ========== RDMA Context Access ==========
+    // Accessor methods for TcpBootstrap server integration
+
+    uint16_t getLid() { return controller_.context().lid(); }
+    std::string getGid() { return controller_.context().gid(); }
+    auto& endpointStore() { return controller_.endpointStore(); }
 
 private:
     // ========== Unified Message Handling ==========
 
     int handlePacket(const std::string& peer_name,
-                     const rapidxfer::RapidXferHeader& header,
+                     const rapid::v1::RapidTransferHeader& header,
                      const std::vector<uint8_t>& payload);
 
     int handleDataPacket(const std::string& peer_name,
-                         const rapidxfer::RapidXferHeader& header,
+                         const rapid::v1::RapidTransferHeader& header,
                          const std::vector<uint8_t>& payload);
 
     int handleReadRequest(const std::string& peer_name,
-                          const rapidxfer::RapidXferHeader& header,
+                          const rapid::v1::RapidTransferHeader& header,
                           const std::vector<uint8_t>& payload);
 
     int handleSACK(const std::string& peer_name,
-                   const rapidxfer::RapidXferHeader& header,
+                   const rapid::v1::RapidTransferHeader& header,
                    const std::vector<uint8_t>& payload);
 
     int handleChunkAck(const std::string& peer_name,
-                      const rapidxfer::RapidXferHeader& header,
+                      const rapid::v1::RapidTransferHeader& header,
                       const std::vector<uint8_t>& payload);
 
     int handleNotification(const std::string& peer_name,
-                          const rapidxfer::RapidXferHeader& header,
+                          const rapid::v1::RapidTransferHeader& header,
                           const std::vector<uint8_t>& payload);
 
     // ========== Low-level Packet Processing ==========
@@ -152,13 +187,6 @@ private:
     int processReceivedPacket(uint64_t current_ts, ibv_wc& wc);
     int submitNormalRecvWR(PacketHandle& handle);
     int sendDataPackets(uint64_t current_ts);
-
-    // ========== TCP Bootstrap ==========
-
-    int startBootstrapListener(const std::string& tcp_address);
-    int stopBootstrapListener();
-    void bootstrapAcceptThread();
-    void handleBootstrapConnection(int client_fd);
 
     // ========== GID:QP to Peer Mapping ==========
 
@@ -175,7 +203,7 @@ private:
     // ========== Core Components ==========
     Controller controller_;
     PacketManager packet_manager_;
-    std::unique_ptr<rapidxfer::Scheduler> scheduler_;
+    std::unique_ptr<rapid::v1::Scheduler> scheduler_;
 
     // ========== Memory Region ==========
     uint32_t local_arena_lkey_;  // LKey for arena memory
@@ -189,13 +217,6 @@ private:
     };
     std::unordered_map<TaskID, Task> task_map_;
     std::atomic<TaskID> next_task_id_;
-
-    // ========== TCP Bootstrap ==========
-    int tcp_listen_fd_{-1};
-    std::thread tcp_accept_thread_;
-    std::atomic<bool> tcp_listener_running_{false};
-    std::string tcp_listen_address_;
-    std::atomic<uint32_t> bootstrap_uid_{0};
 
     // GID:QP to peer address mapping (for routing incoming UD packets)
     std::unordered_map<std::string, std::string> gid_qp_to_peer_map_;
@@ -225,6 +246,11 @@ private:
     // ========== Callbacks ==========
     ReadCallback read_callback_;
     NotificationCallback notification_callback_;
+    TransferCompleteCallback transfer_complete_callback_;
+
+    // ========== Buffer Info ==========
+    std::optional<BufferInfo> local_buffer_info_;
+    mutable std::mutex buffer_info_mutex_;
 
     // ========== Statistics ==========
     static constexpr uint64_t kMinRTO = 100;  // 100us

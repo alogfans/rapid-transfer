@@ -7,11 +7,11 @@
 #include "impl.h"
 
 #include <glog/logging.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
+
+#include <cstring>
+#include <sstream>
+
+#include "tcp_bootstrap.h"
 
 namespace rapid {
 namespace v1 {
@@ -26,6 +26,12 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
     listen_address_ = listen_address;
     start_time_ = std::chrono::steady_clock::now();
 
+    // Set transfer complete callback before constructing context
+    ud_context_.setTransferCompleteCallback(
+        [this](TaskID task_id, const std::string& peer_name, Status status) {
+            onTransferComplete(task_id, peer_name, status);
+        });
+
     // Construct UD Context
     int ret = ud_context_.construct(
         rail_config.device_name, rail_config.rdma_port, rail_config.gid_index);
@@ -37,11 +43,15 @@ int RapidTransfer::Impl::initialize(const RailConfig& rail_config,
 
     rail_state_ = RailState::ACTIVE;
 
-    LOG(INFO) << "[RapidTransfer] Initialized with device: " << rail_config.device_name;
+    LOG(INFO) << "[RapidTransfer] Initialized with device: "
+              << rail_config.device_name;
     return 0;
 }
 
 int RapidTransfer::Impl::shutdown() {
+    // Stop TCP Bootstrap listener first
+    stopBootstrapListener();
+
     int ret = ud_context_.deconstruct();
     rail_state_ = RailState::DISABLED;
     running_ = false;
@@ -54,25 +64,24 @@ int RapidTransfer::Impl::shutdown() {
     return ret;
 }
 
-int RapidTransfer::Impl::runStep() {
-    return ud_context_.runStep();
-}
+int RapidTransfer::Impl::runStep() { return ud_context_.runStep(); }
 
 // ============================================================================
 // Connection Management
 // ============================================================================
 
 int RapidTransfer::Impl::prepareConnection(const std::string& peer_name,
-                                          Attributes& local_attrs) {
+                                           Attributes& local_attrs) {
     return ud_context_.prepareConnection(peer_name, local_attrs);
 }
 
 int RapidTransfer::Impl::setupConnection(const std::string& peer_name,
-                                        const Attributes& peer_attrs) {
+                                         const Attributes& peer_attrs) {
     return ud_context_.setupConnection(peer_name, peer_attrs);
 }
 
-int RapidTransfer::Impl::ensureConnection(const std::string& peer_name, bool for_write) {
+int RapidTransfer::Impl::ensureConnection(const std::string& peer_name,
+                                          bool for_write) {
     // Check if already connected
     {
         std::lock_guard<std::mutex> lock(connection_mutex_);
@@ -80,17 +89,6 @@ int RapidTransfer::Impl::ensureConnection(const std::string& peer_name, bool for
             return 0;  // Already connected
         }
     }
-
-    // Parse peer address (format: "host:port")
-    size_t colon_pos = peer_name.find_last_of(':');
-    if (colon_pos == std::string::npos) {
-        LOG(ERROR) << "[RapidTransfer] Invalid peer address format: " << peer_name;
-        return -1;
-    }
-
-    std::string peer_host = peer_name.substr(0, colon_pos);
-    std::string peer_port_str = peer_name.substr(colon_pos + 1);
-    int peer_port = std::stoi(peer_port_str);
 
     // Get local UD info
     Attributes local_attrs;
@@ -100,57 +98,71 @@ int RapidTransfer::Impl::ensureConnection(const std::string& peer_name, bool for
         return ret;
     }
 
-    // Create TCP socket for bootstrap
-    int tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (tcp_sock < 0) {
-        LOG(ERROR) << "[RapidTransfer] Failed to create TCP socket";
+    // Prepare local UDInfo (using TcpBootstrap types)
+    TcpBootstrap::UDInfo local_info;
+    local_info.lid = std::stoi(local_attrs.at("lid"));
+
+    // Convert GID string to bytes
+    std::string gid_str = local_attrs.at("gid");
+    memset(local_info.gid, 0, sizeof(local_info.gid));
+    // Parse GID string format "xx:xx:..." to bytes
+    std::istringstream gid_iss(gid_str);
+    for (int i = 0; i < 16; ++i) {
+        int value;
+        gid_iss >> std::hex >> value;
+        local_info.gid[i] = static_cast<uint8_t>(value);
+        if (i < 15) {
+            char colon;
+            gid_iss >> colon;
+        }
+    }
+
+    // Parse all QP numbers
+    std::string qp_str = local_attrs.at("qp");
+    std::istringstream qp_iss(qp_str);
+    std::vector<uint32_t> qp_nums;
+    uint32_t qp_num;
+    while (qp_iss >> qp_num) {
+        qp_nums.push_back(qp_num);
+    }
+
+    if (qp_nums.empty()) {
+        LOG(ERROR) << "[RapidTransfer] No QP numbers available";
         return -1;
     }
 
-    // Set socket timeout
-    struct timeval tv;
-    tv.tv_sec = 5;  // 5 second timeout
-    tv.tv_usec = 0;
-    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    // Assign QP numbers directly to the vector
+    local_info.qp_nums = std::move(qp_nums);
 
-    // Connect to peer
-    struct sockaddr_in peer_addr;
-    memset(&peer_addr, 0, sizeof(peer_addr));
-    peer_addr.sin_family = AF_INET;
-    peer_addr.sin_port = htons(peer_port);
+    LOG(INFO) << "[RapidTransfer] Prepared " << local_info.qp_nums.size()
+              << " QP numbers";
 
-    if (inet_pton(AF_INET, peer_host.c_str(), &peer_addr.sin_addr) <= 0) {
-        LOG(ERROR) << "[RapidTransfer] Invalid peer address: " << peer_host;
-        close(tcp_sock);
-        return -1;
+    // Exchange UD info via TCP bootstrap
+    TcpBootstrap::UDInfo peer_info;
+    ret = TcpBootstrap::exchangeUDInfo(peer_name, local_info, peer_info);
+    if (ret < 0) {
+        LOG(ERROR) << "[RapidTransfer] UD info exchange failed";
+        return ret;
     }
 
-    if (connect(tcp_sock, (struct sockaddr*)&peer_addr, sizeof(peer_addr)) < 0) {
-        LOG(ERROR) << "[RapidTransfer] TCP connection failed to " << peer_name;
-        close(tcp_sock);
-        return -1;
+    // Convert peer GID bytes to string
+    char peer_gid_str[64];
+    for (int i = 0; i < 16; ++i) {
+        sprintf(&peer_gid_str[i * 2], "%02x", peer_info.gid[i]);
     }
 
-    LOG(INFO) << "[RapidTransfer] TCP bootstrap connected to " << peer_name;
-
-    // Send local UD info (simplified - just send a marker for now)
-    // In production, you would exchange LID, GID, QP numbers, etc.
-    uint32_t local_marker = 0x12345678;
-    send(tcp_sock, &local_marker, sizeof(local_marker), 0);
-
-    // Receive peer's UD info
-    uint32_t peer_marker;
-    recv(tcp_sock, &peer_marker, sizeof(peer_marker), MSG_WAITALL);
-
-    close(tcp_sock);
+    // Convert peer QP numbers to string format
+    std::stringstream peer_qp_ss;
+    for (size_t i = 0; i < peer_info.qp_nums.size(); ++i) {
+        if (i > 0) peer_qp_ss << " ";
+        peer_qp_ss << peer_info.qp_nums[i];
+    }
 
     // Setup UD connection using exchanged info
     Attributes peer_attrs;
-    // For now, use placeholder attributes (in production, exchange real UD info)
-    peer_attrs["lid"] = std::to_string(peer_marker & 0xFFFF);
-    peer_attrs["qp_num"] = std::to_string((peer_marker >> 16) & 0xFFFF);
-    peer_attrs["gid"] = "fe80::0000:0000:0000:0000";  // Placeholder GID
+    peer_attrs["lid"] = std::to_string(peer_info.lid);
+    peer_attrs["gid"] = std::string(peer_gid_str, 32);
+    peer_attrs["qp"] = peer_qp_ss.str();
 
     ret = setupConnection(peer_name, peer_attrs);
     if (ret < 0) {
@@ -173,10 +185,9 @@ int RapidTransfer::Impl::ensureConnection(const std::string& peer_name, bool for
 // ============================================================================
 
 TaskID RapidTransfer::Impl::write(const std::string& peer_name,
-                                     const std::vector<Buffer>& local_buffers,
-                                     const std::vector<Buffer>& remote_buffers,
-                                     const std::string& notify_message) {
-
+                                  const std::vector<Buffer>& local_buffers,
+                                  const std::vector<Buffer>& remote_buffers,
+                                  const std::string& notify_message) {
     LOG(INFO) << "[RapidTransfer] write to " << peer_name
               << ", local_bufs=" << local_buffers.size()
               << ", remote_bufs=" << remote_buffers.size();
@@ -188,7 +199,8 @@ TaskID RapidTransfer::Impl::write(const std::string& peer_name,
     }
 
     // Start write operation via Context
-    TaskID task_id = ud_context_.startWrite(peer_name, local_buffers, remote_buffers);
+    TaskID task_id =
+        ud_context_.startWrite(peer_name, local_buffers, remote_buffers);
 
     if (task_id < 0) {
         LOG(ERROR) << "[RapidTransfer] Failed to start write";
@@ -213,19 +225,23 @@ TaskID RapidTransfer::Impl::write(const std::string& peer_name,
         task_results_[task_id] = result;
     }
 
-    // Send notification if requested
+    // Store pending notification to be sent when transfer completes
     if (!notify_message.empty()) {
-        notify(peer_name, task_id, notify_message);
+        std::lock_guard<std::mutex> lock(notifications_mutex_);
+        PendingNotification pending;
+        pending.peer_name = peer_name;
+        pending.message = notify_message;
+        pending.sent = false;
+        pending_notifications_[task_id] = pending;
     }
 
     return task_id;
 }
 
 TaskID RapidTransfer::Impl::read(const std::string& peer_name,
-                                    const std::vector<Buffer>& local_buffers,
-                                    const std::vector<Buffer>& remote_buffers,
-                                    const std::string& notify_message) {
-
+                                 const std::vector<Buffer>& local_buffers,
+                                 const std::vector<Buffer>& remote_buffers,
+                                 const std::string& notify_message) {
     LOG(INFO) << "[RapidTransfer] read from " << peer_name
               << ", local_bufs=" << local_buffers.size()
               << ", remote_bufs=" << remote_buffers.size();
@@ -237,7 +253,8 @@ TaskID RapidTransfer::Impl::read(const std::string& peer_name,
     }
 
     // Start read operation via Context (sends Read Request packet)
-    TaskID task_id = ud_context_.startRead(peer_name, local_buffers, remote_buffers);
+    TaskID task_id =
+        ud_context_.startRead(peer_name, local_buffers, remote_buffers);
 
     if (task_id < 0) {
         LOG(ERROR) << "[RapidTransfer] Failed to start read";
@@ -262,9 +279,14 @@ TaskID RapidTransfer::Impl::read(const std::string& peer_name,
         task_results_[task_id] = result;
     }
 
-    // Send notification if requested
+    // Store pending notification to be sent when transfer completes
     if (!notify_message.empty()) {
-        notify(peer_name, task_id, notify_message);
+        std::lock_guard<std::mutex> lock(notifications_mutex_);
+        PendingNotification pending;
+        pending.peer_name = peer_name;
+        pending.message = notify_message;
+        pending.sent = false;
+        pending_notifications_[task_id] = pending;
     }
 
     return task_id;
@@ -274,7 +296,8 @@ TaskID RapidTransfer::Impl::read(const std::string& peer_name,
 // Status and Operations
 // ============================================================================
 
-Status RapidTransfer::Impl::getStatus(TaskID task_id, size_t* transferred_bytes) {
+Status RapidTransfer::Impl::getStatus(TaskID task_id,
+                                      size_t* transferred_bytes) {
     std::lock_guard<std::mutex> lock(task_results_mutex_);
 
     auto it = task_results_.find(task_id);
@@ -289,7 +312,8 @@ Status RapidTransfer::Impl::getStatus(TaskID task_id, size_t* transferred_bytes)
     return it->second.status;
 }
 
-Status RapidTransfer::Impl::wait(TaskID task_id, std::chrono::milliseconds timeout) {
+Status RapidTransfer::Impl::wait(TaskID task_id,
+                                 std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(task_results_mutex_);
 
     // Check if task exists
@@ -305,7 +329,8 @@ Status RapidTransfer::Impl::wait(TaskID task_id, std::chrono::milliseconds timeo
         if (task_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
             // Timeout occurred
             if (it->second.status == Status::PENDING) {
-                LOG(WARNING) << "[RapidTransfer] Task " << task_id << " timed out";
+                LOG(WARNING)
+                    << "[RapidTransfer] Task " << task_id << " timed out";
                 return Status::PENDING;  // Still pending after timeout
             }
             break;
@@ -315,7 +340,8 @@ Status RapidTransfer::Impl::wait(TaskID task_id, std::chrono::milliseconds timeo
     return it->second.status;
 }
 
-std::optional<TransferResult> RapidTransfer::Impl::getTransferResult(TaskID task_id) {
+std::optional<TransferResult> RapidTransfer::Impl::getTransferResult(
+    TaskID task_id) {
     std::lock_guard<std::mutex> lock(task_results_mutex_);
 
     auto it = task_results_.find(task_id);
@@ -336,40 +362,58 @@ int RapidTransfer::Impl::freeTask(TaskID task_id) {
 // Notifications
 // ============================================================================
 
-void RapidTransfer::Impl::setNotificationCallback(NotificationCallback callback) {
+void RapidTransfer::Impl::setNotificationCallback(
+    NotificationCallback callback) {
     user_notification_callback_ = std::move(callback);
 }
 
 int RapidTransfer::Impl::notify(const std::string& peer_name, TaskID task_id,
-                               const std::string& message) {
-
+                                const std::string& message) {
     LOG(INFO) << "[RapidTransfer] notify " << peer_name
-              << ", task_id=" << task_id
-              << ", message=" << message;
+              << ", task_id=" << task_id << ", message=" << message;
 
-    // Store notification for tracking
+    // Send notification packet immediately (user-initiated, not delayed)
+    return ud_context_.sendNotification(peer_name, task_id, message);
+}
+
+void RapidTransfer::Impl::onTransferComplete(TaskID task_id,
+                                             const std::string& peer_name,
+                                             Status status) {
+    LOG(INFO) << "[RapidTransfer] Transfer complete: task_id=" << task_id
+              << ", peer=" << peer_name
+              << ", status=" << static_cast<int>(status);
+
+    // Update task result status
+    {
+        std::lock_guard<std::mutex> lock(task_results_mutex_);
+        auto it = task_results_.find(task_id);
+        if (it != task_results_.end()) {
+            it->second.status = status;
+        }
+        task_cv_.notify_all();
+    }
+
+    // Send pending notification if any
     {
         std::lock_guard<std::mutex> lock(notifications_mutex_);
-        PendingNotification pending;
-        pending.peer_name = peer_name;
-        pending.message = message;
-        pending.sent = false;
-        pending_notifications_[task_id] = pending;
-    }
-
-    // Send notification packet via Context
-    int ret = ud_context_.sendNotification(peer_name, task_id, message);
-
-    // Mark as sent if successful
-    if (ret == 0) {
-        std::lock_guard<std::mutex> lock(notifications_mutex_);
         auto it = pending_notifications_.find(task_id);
-        if (it != pending_notifications_.end()) {
-            it->second.sent = true;
+        if (it != pending_notifications_.end() && !it->second.sent) {
+            // Send notification now that transfer is complete
+            const auto& pending = it->second;
+            int ret = ud_context_.sendNotification(pending.peer_name, task_id,
+                                                   pending.message);
+            if (ret == 0) {
+                it->second.sent = true;
+                LOG(INFO)
+                    << "[RapidTransfer] Sent delayed notification for task "
+                    << task_id;
+            } else {
+                LOG(ERROR) << "[RapidTransfer] Failed to send delayed "
+                              "notification for task "
+                           << task_id;
+            }
         }
     }
-
-    return ret;
 }
 
 // ============================================================================
@@ -403,77 +447,152 @@ int RapidTransfer::Impl::unregisterLocalMemory(void* addr) {
 // ============================================================================
 
 void RapidTransfer::Impl::setBufferInfo(const RapidTransfer::BufferInfo& info) {
-    std::lock_guard<std::mutex> lock(buffer_info_mutex_);
-    local_buffer_info_ = info;
-    LOG(INFO) << "[RapidTransfer] Local buffer info set: addr=0x"
-              << std::hex << info.addr << std::dec
-              << ", size=" << info.length;
+    // Store in impl layer for compatibility
+    {
+        std::lock_guard<std::mutex> lock(buffer_info_mutex_);
+        local_buffer_info_ = info;
+    }
+
+    // Sync to Context layer for TCP bootstrap server
+    rapid::Context::BufferInfo ctx_info;
+    ctx_info.addr = info.addr;
+    ctx_info.length = info.length;
+    ctx_info.rkey = info.rkey;
+    ud_context_.setBufferInfo(ctx_info);
+
+    LOG(INFO) << "[RapidTransfer] Local buffer info set: addr=0x" << std::hex
+              << info.addr << std::dec << ", size=" << info.length;
 }
 
-std::optional<RapidTransfer::BufferInfo> RapidTransfer::Impl::getRemoteBufferInfo(const std::string& peer_address) {
-    // Request buffer info from remote peer via TCP
-    // Parse peer address
-    size_t colon_pos = peer_address.find_last_of(':');
-    if (colon_pos == std::string::npos) {
-        LOG(ERROR) << "[RapidTransfer] Invalid peer address format: " << peer_address;
+std::optional<RapidTransfer::BufferInfo>
+RapidTransfer::Impl::getRemoteBufferInfo(const std::string& peer_address) {
+    // Use TcpBootstrap to request buffer info
+    auto tcp_info = TcpBootstrap::getBufferInfo(peer_address);
+    if (!tcp_info) {
         return std::nullopt;
     }
 
-    std::string peer_host = peer_address.substr(0, colon_pos);
-    std::string peer_port_str = peer_address.substr(colon_pos + 1);
-    int peer_port = std::stoi(peer_port_str);
-
-    // Create TCP socket
-    int tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (tcp_sock < 0) {
-        LOG(ERROR) << "[RapidTransfer] Failed to create TCP socket for buffer info";
-        return std::nullopt;
-    }
-
-    // Set socket timeout
-    struct timeval tv;
-    tv.tv_sec = 5;
-    tv.tv_usec = 0;
-    setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    // Connect to peer
-    struct sockaddr_in peer_addr;
-    memset(&peer_addr, 0, sizeof(peer_addr));
-    peer_addr.sin_family = AF_INET;
-    peer_addr.sin_port = htons(peer_port);
-
-    if (inet_pton(AF_INET, peer_host.c_str(), &peer_addr.sin_addr) <= 0) {
-        LOG(ERROR) << "[RapidTransfer] Invalid peer address: " << peer_host;
-        close(tcp_sock);
-        return std::nullopt;
-    }
-
-    if (connect(tcp_sock, (struct sockaddr*)&peer_addr, sizeof(peer_addr)) < 0) {
-        LOG(ERROR) << "[RapidTransfer] TCP connection failed to " << peer_address;
-        close(tcp_sock);
-        return std::nullopt;
-    }
-
-    // Send buffer info request (simple marker)
-    uint32_t request = 0xBEEFBEEF;
-    send(tcp_sock, &request, sizeof(request), 0);
-
-    // Receive buffer info
+    // Convert TcpBootstrap::BufferInfo to RapidTransfer::BufferInfo
     RapidTransfer::BufferInfo info;
-    ssize_t recv_len = recv(tcp_sock, &info, sizeof(info), MSG_WAITALL);
-    close(tcp_sock);
-
-    if (recv_len != sizeof(info)) {
-        LOG(ERROR) << "[RapidTransfer] Failed to receive buffer info from " << peer_address;
-        return std::nullopt;
-    }
+    info.addr = tcp_info->addr;
+    info.length = tcp_info->length;
+    info.rkey = tcp_info->rkey;
 
     LOG(INFO) << "[RapidTransfer] Received buffer info from " << peer_address
               << ": addr=0x" << std::hex << info.addr << std::dec
               << ", size=" << info.length;
 
     return info;
+}
+
+// ============================================================================
+// TCP Bootstrap Server
+// ============================================================================
+
+int RapidTransfer::Impl::startBootstrapListener(const std::string& tcp_address) {
+    std::lock_guard<std::mutex> lock(tcp_bootstrap_mutex_);
+
+    if (tcp_bootstrap_) {
+        LOG(WARNING) << "[RapidTransfer] TCP Bootstrap listener already running";
+        return -1;
+    }
+
+    tcp_bootstrap_ = std::make_unique<TcpBootstrap>();
+
+    // Set UD connect callback
+    tcp_bootstrap_->setUDConnectCallback([this](const std::string& peer_addr,
+                                                       TcpBootstrap::UDInfo& local_info,
+                                                       const TcpBootstrap::UDInfo& peer_info) {
+        // Convert peer UD info to connection attributes
+        char peer_gid_str[64];
+        for (int i = 0; i < 16; ++i) {
+            sprintf(&peer_gid_str[i * 2], "%02x", peer_info.gid[i]);
+        }
+
+        // Convert QP numbers to string format
+        std::stringstream qp_ss;
+        for (size_t i = 0; i < peer_info.qp_nums.size(); ++i) {
+            if (i > 0) qp_ss << " ";
+            qp_ss << peer_info.qp_nums[i];
+        }
+
+        Attributes peer_attrs;
+        peer_attrs["lid"] = std::to_string(peer_info.lid);
+        peer_attrs["gid"] = std::string(peer_gid_str, 32);
+        peer_attrs["qp"] = qp_ss.str();
+
+        // Create peer address string (use first QP)
+        std::string peer_name = std::string(peer_gid_str) + ":" +
+                                std::to_string(peer_info.qp_nums[0]);
+
+        // Setup UD connection
+        int ret = ud_context_.setupConnection(peer_name, peer_attrs);
+        if (ret != 0) {
+            LOG(ERROR) << "[RapidTransfer] Failed to setup UD connection for " << peer_name;
+            return false;
+        }
+
+        // Fill local UD info using accessor methods
+        uint16_t local_lid = ud_context_.getLid();
+        std::string local_gid_str = ud_context_.getGid();
+
+        local_info.lid = local_lid;
+        memset(local_info.gid, 0, sizeof(local_info.gid));
+
+        // Parse GID string format "xx:xx:..." to bytes
+        std::istringstream gid_iss(local_gid_str);
+        for (int i = 0; i < 16 && !gid_iss.eof(); ++i) {
+            int value;
+            gid_iss >> std::hex >> value;
+            local_info.gid[i] = static_cast<uint8_t>(value);
+            if (!gid_iss.eof()) {
+                char colon;
+                gid_iss >> colon;
+            }
+        }
+
+        // Get local QP numbers from endpoint store using accessor method
+        auto& endpoint_store = ud_context_.endpointStore();
+        auto qp_nums = endpoint_store.qpNum();
+        local_info.qp_nums = qp_nums;
+
+        LOG(INFO) << "[RapidTransfer] Accepted UD connection from " << peer_addr;
+        return true;
+    });
+
+    // Set buffer info callback
+    tcp_bootstrap_->setBufferInfoCallback([this]() -> std::optional<TcpBootstrap::BufferInfo> {
+        std::lock_guard<std::mutex> lock(buffer_info_mutex_);
+        if (local_buffer_info_) {
+            TcpBootstrap::BufferInfo info;
+            info.addr = local_buffer_info_->addr;
+            info.length = local_buffer_info_->length;
+            info.rkey = local_buffer_info_->rkey;
+            return info;
+        }
+        return std::nullopt;
+    });
+
+    // Start listener
+    int ret = tcp_bootstrap_->startListener(tcp_address);
+    if (ret < 0) {
+        LOG(ERROR) << "[RapidTransfer] Failed to start TCP Bootstrap listener";
+        tcp_bootstrap_.reset();
+        return ret;
+    }
+
+    LOG(INFO) << "[RapidTransfer] TCP Bootstrap listener started on " << tcp_address;
+    return 0;
+}
+
+void RapidTransfer::Impl::stopBootstrapListener() {
+    std::lock_guard<std::mutex> lock(tcp_bootstrap_mutex_);
+
+    if (tcp_bootstrap_) {
+        tcp_bootstrap_->stopListener();
+        tcp_bootstrap_.reset();
+        LOG(INFO) << "[RapidTransfer] TCP Bootstrap listener stopped";
+    }
 }
 
 // ============================================================================
@@ -501,5 +620,5 @@ void RapidTransfer::Impl::stopProgressThread() {
     }
 }
 
-} // namespace v1
-} // namespace rapid
+}  // namespace v1
+}  // namespace rapid

@@ -97,6 +97,14 @@ std::optional<RapidTransfer::BufferInfo> RapidTransfer::getRemoteBufferInfo(cons
     return impl_->getRemoteBufferInfo(peer_address);
 }
 
+int RapidTransfer::startBootstrapListener(const std::string& tcp_address) {
+    return impl_->startBootstrapListener(tcp_address);
+}
+
+void RapidTransfer::stopBootstrapListener() {
+    impl_->stopBootstrapListener();
+}
+
 int RapidTransfer::runStep() { return impl_->runStep(); }
 
 int RapidTransfer::shutdown() { return impl_->shutdown(); }

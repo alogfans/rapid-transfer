@@ -211,6 +211,17 @@ class RapidTransfer {
     std::optional<BufferInfo> getRemoteBufferInfo(const std::string& peer_address);
 
     // ========================================================================
+    // TCP Bootstrap Server
+    // ========================================================================
+
+    /// Start TCP bootstrap listener for handling peer connection requests
+    /// The listener will automatically handle UD connection exchange and buffer info requests
+    int startBootstrapListener(const std::string& tcp_address);
+
+    /// Stop TCP bootstrap listener
+    void stopBootstrapListener();
+
+    // ========================================================================
     // Lifecycle Management
     // ========================================================================
 
@@ -231,6 +242,9 @@ class RapidTransfer {
 
     RapidTransfer() = default;
 };
+
+// Forward declaration - TcpBootstrap is defined in tcp_bootstrap.h
+class TcpBootstrap;
 
 }  // namespace v1
 }  // namespace rapid

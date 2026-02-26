@@ -1,8 +1,8 @@
 // scheduler.cpp
 //
-// RapidXfer QP Pool Scheduler Implementation
+// RapidTransfer QP Pool Scheduler Implementation
 //
-// Copyright (C) 2026 RapidXfer Team
+// Copyright (C) 2026 RapidTransfer Team
 
 #include "scheduler.h"
 
@@ -10,7 +10,7 @@
 #include <chrono>
 
 namespace rapid {
-namespace rapidxfer {
+namespace v1 {
 
 Scheduler::Scheduler(const SchedulerConfig& config)
     : config_(config) {
@@ -99,11 +99,11 @@ void Scheduler::reclaimIdleQPs() {
     }
 }
 
-int Scheduler::getOrCreateSession(const std::string& peer_addr) {
+VirtualSession* Scheduler::getOrCreateSession(const std::string& peer_addr) {
     // Check if session already exists
     auto it = peer_to_session_.find(peer_addr);
     if (it != peer_to_session_.end()) {
-        return it->second;
+        return getSession(it->second);
     }
 
     // Create new session
@@ -124,7 +124,7 @@ int Scheduler::getOrCreateSession(const std::string& peer_addr) {
     peer_to_session_[peer_addr] = session_id;
 
     LOG(INFO) << "[Scheduler] Created session " << session_id << " for peer " << peer_addr;
-    return session_id;
+    return getSession(session_id);
 }
 
 void Scheduler::destroySession(int session_id) {
@@ -151,12 +151,6 @@ VirtualSession* Scheduler::getSession(int session_id) {
     return &it->second;
 }
 
-VirtualSession* Scheduler::getSessionByPeer(const std::string& peer_addr) {
-    auto it = peer_to_session_.find(peer_addr);
-    if (it == peer_to_session_.end()) return nullptr;
-    return getSession(it->second);
-}
-
 void Scheduler::runStep() {
     // Reclaim idle QPs
     reclaimIdleQPs();
@@ -171,5 +165,5 @@ uint64_t Scheduler::getCurrentTimestamp() const {
     return std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
 }
 
-} // namespace rapidxfer
+} // namespace v1
 } // namespace rapid

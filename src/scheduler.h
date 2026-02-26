@@ -1,9 +1,9 @@
 // scheduler.h
 //
-// RapidXfer QP Pool Scheduler
+// RapidTransfer QP Pool Scheduler
 // Manages dynamic QP allocation for virtual sessions
 //
-// Copyright (C) 2026 RapidXfer Team
+// Copyright (C) 2026 RapidTransfer Team
 
 #ifndef SCHEDULER_H_
 #define SCHEDULER_H_
@@ -16,10 +16,11 @@
 #include "rapid_transfer.h"
 
 namespace rapid {
-namespace rapidxfer {
 
-// Forward declaration
+// Forward declaration (Context is in rapid namespace, not rapid::v1)
 class Context;
+
+namespace v1 {
 
 // Physical QP state
 struct PhysicalQP {
@@ -89,17 +90,14 @@ public:
 
     // ========== Session Management ==========
 
-    // Create or get a session
-    int getOrCreateSession(const std::string& peer_addr);
+    // Get or create session (returns pointer, creates if not exists)
+    VirtualSession* getOrCreateSession(const std::string& peer_addr);
 
     // Destroy a session
     void destroySession(int session_id);
 
     // Get session by ID
     VirtualSession* getSession(int session_id);
-
-    // Get session by peer address
-    VirtualSession* getSessionByPeer(const std::string& peer_addr);
 
     // ========== Progress Loop ==========
 
@@ -131,7 +129,7 @@ private:
     uint64_t getCurrentTimestamp() const;
 };
 
-} // namespace rapidxfer
+} // namespace v1
 } // namespace rapid
 
 #endif  // SCHEDULER_H_

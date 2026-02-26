@@ -17,6 +17,7 @@
 #include <unordered_map>
 
 #include "context.h"
+#include "tcp_bootstrap.h"
 #include "rapid_transfer.h"
 
 namespace rapid {
@@ -104,7 +105,18 @@ class RapidTransfer::Impl {
     // ========================================================================
 
     void setBufferInfo(const RapidTransfer::BufferInfo& info);
-    std::optional<RapidTransfer::BufferInfo> getRemoteBufferInfo(const std::string& peer_address);
+    std::optional<RapidTransfer::BufferInfo> getRemoteBufferInfo(
+        const std::string& peer_address);
+
+    // ========================================================================
+    // TCP Bootstrap Server
+    // ========================================================================
+
+    /// Start TCP bootstrap listener for UD connection exchange
+    int startBootstrapListener(const std::string& tcp_address);
+
+    /// Stop TCP bootstrap listener
+    void stopBootstrapListener();
 
    private:
     // ========================================================================
@@ -114,6 +126,8 @@ class RapidTransfer::Impl {
     int makeConnectionIfNeeded(const std::string& peer_name);
     void startProgressThread();
     void stopProgressThread();
+    void onTransferComplete(TaskID task_id, const std::string& peer_name,
+                            Status status);
 
    private:
     // ========================================================================
@@ -151,6 +165,10 @@ class RapidTransfer::Impl {
     // Local buffer info (for sharing with peers)
     std::optional<RapidTransfer::BufferInfo> local_buffer_info_;
     mutable std::mutex buffer_info_mutex_;
+
+    // TCP Bootstrap server (for handling peer connection requests)
+    std::unique_ptr<TcpBootstrap> tcp_bootstrap_;
+    mutable std::mutex tcp_bootstrap_mutex_;
 
     // Connected peers tracking
     std::unordered_map<std::string, bool> connected_peers_;
